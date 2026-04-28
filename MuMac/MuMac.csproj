@@ -13,7 +13,8 @@
     <PublishReadyToRun>false</PublishReadyToRun>
     <TieredCompilation>true</TieredCompilation>
 
-    <RuntimeIdentifier>osx-x64</RuntimeIdentifier>
+    <!-- Apple Silicon: osx-arm64. Intel Mac: -p:RuntimeIdentifier=osx-x64 -->
+    <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
     <UseAppHost>true</UseAppHost>
 
     <UseSourceGenerators>true</UseSourceGenerators>
