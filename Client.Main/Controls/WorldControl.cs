@@ -8,12 +8,14 @@ using Client.Main.Helpers;
 using Client.Main.Models;
 using Client.Main.Objects;
 using Client.Main.Objects.Effects;
+using Client.Main.Objects.Particles;
 using Client.Main.Objects.Player;
 using Microsoft.Extensions.Logging;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 
 namespace Client.Main.Controls
 {
@@ -61,61 +63,97 @@ namespace Client.Main.Controls
         }
     }
 
-    // Optimized comparer that sorts by Model+Texture first, then depth
-    // This minimizes state changes and improves GPU cache coherency
-    sealed class WorldObjectBatchOptimizedAsc : IComparer<WorldObject>
+    readonly struct WorldObjectBatchSortKey
     {
-        public static readonly WorldObjectBatchOptimizedAsc Instance = new();
+        public readonly int TextureKey;
+        public readonly int BlendKey;
+        public readonly int ModelKey;
+        public readonly float Depth;
+        public readonly ushort NetworkId;
+        public readonly int Ordinal;
+        public readonly bool IsModel;
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public int Compare(WorldObject a, WorldObject b)
+        public WorldObjectBatchSortKey(
+            int textureKey,
+            int blendKey,
+            int modelKey,
+            float depth,
+            ushort networkId,
+            int ordinal,
+            bool isModel)
         {
-            if (a is ModelObject ma && b is ModelObject mb)
-            {
-                // Prioritize by texture and blend state to minimize state changes
-                int texCmp = ComparerHelper.CompareRefs(ma.GetSortTextureHint(), mb.GetSortTextureHint());
-                if (texCmp != 0) return texCmp;
-
-                int blendCmp = ComparerHelper.CompareRefs(ma.BlendState, mb.BlendState);
-                if (blendCmp != 0) return blendCmp;
-
-                int modelCmp = ComparerHelper.CompareRefs(ma.Model, mb.Model);
-                if (modelCmp != 0) return modelCmp;
-            }
-
-            // Then by depth for correct rendering order
-            int depthCmp = a.Depth.CompareTo(b.Depth);
-            if (depthCmp != 0) return depthCmp;
-
-            return a.NetworkId.CompareTo(b.NetworkId);
+            TextureKey = textureKey;
+            BlendKey = blendKey;
+            ModelKey = modelKey;
+            Depth = depth;
+            NetworkId = networkId;
+            Ordinal = ordinal;
+            IsModel = isModel;
         }
     }
 
-    sealed class WorldObjectBatchOptimizedDesc : IComparer<WorldObject>
+    sealed class WorldObjectBatchSnapshotAsc : IComparer<WorldObject>
     {
-        public static readonly WorldObjectBatchOptimizedDesc Instance = new();
+        private IReadOnlyDictionary<WorldObject, WorldObjectBatchSortKey> _keys;
+
+        public void SetKeys(IReadOnlyDictionary<WorldObject, WorldObjectBatchSortKey> keys)
+        {
+            _keys = keys;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int CompareDepth(float a, float b)
+        {
+            bool aNaN = float.IsNaN(a);
+            bool bNaN = float.IsNaN(b);
+            if (aNaN || bNaN)
+            {
+                if (aNaN && bNaN) return 0;
+                return aNaN ? 1 : -1;
+            }
+
+            return a.CompareTo(b);
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int Compare(WorldObject a, WorldObject b)
         {
-            if (a is ModelObject ma && b is ModelObject mb)
+            if (ReferenceEquals(a, b))
+                return 0;
+            if (a is null)
+                return -1;
+            if (b is null)
+                return 1;
+
+            if (_keys == null ||
+                !_keys.TryGetValue(a, out var ka) ||
+                !_keys.TryGetValue(b, out var kb))
             {
-                // Prioritize by texture and blend state to minimize state changes
-                int texCmp = ComparerHelper.CompareRefs(ma.GetSortTextureHint(), mb.GetSortTextureHint());
+                return WorldObjectDepthAsc.Instance.Compare(a, b);
+            }
+
+            if (ka.IsModel && kb.IsModel)
+            {
+                int texCmp = ka.TextureKey.CompareTo(kb.TextureKey);
                 if (texCmp != 0) return texCmp;
 
-                int blendCmp = ComparerHelper.CompareRefs(ma.BlendState, mb.BlendState);
+                int blendCmp = ka.BlendKey.CompareTo(kb.BlendKey);
                 if (blendCmp != 0) return blendCmp;
 
-                int modelCmp = ComparerHelper.CompareRefs(ma.Model, mb.Model);
+                int modelCmp = ka.ModelKey.CompareTo(kb.ModelKey);
                 if (modelCmp != 0) return modelCmp;
             }
 
-            // Then by depth (descending) for correct rendering order
-            int depthCmp = b.Depth.CompareTo(a.Depth);
+            int depthCmp = CompareDepth(ka.Depth, kb.Depth);
             if (depthCmp != 0) return depthCmp;
 
-            return b.NetworkId.CompareTo(a.NetworkId);
+            int idCmp = ka.NetworkId.CompareTo(kb.NetworkId);
+            if (idCmp != 0) return idCmp;
+
+            int ordinalCmp = ka.Ordinal.CompareTo(kb.Ordinal);
+            if (ordinalCmp != 0) return ordinalCmp;
+
+            return ComparerHelper.CompareRefs(a, b);
         }
     }
 
@@ -134,13 +172,39 @@ namespace Client.Main.Controls
         private readonly List<WorldObject> _solidBehind = [];
         private readonly List<WorldObject> _transparentObjects = [];
         private readonly List<WorldObject> _solidInFront = [];
+        private readonly Dictionary<WorldObject, WorldObjectBatchSortKey> _batchSortKeys = [];
+        private readonly WorldObjectBatchSnapshotAsc _batchSortComparerAsc = new();
         private readonly List<WalkerObject> _walkers = [];
         private readonly List<PlayerObject> _players = [];
         private readonly List<MonsterObject> _monsters = [];
         private readonly List<DroppedItemObject> _droppedItems = [];
         private readonly Queue<WorldObject> _objectsToInitialize = [];
         private readonly List<WorldObject> _visibleObjects = [];
+        private readonly HashSet<WorldObject> _visibleObjectSet = [];
+        private readonly HashSet<WorldObject> _positionDirtyObjects = [];
+        private readonly object _visibleMergeLock = new();
         private bool _dirtyVisibleObjects = true;
+        private bool _hasVisibilitySnapshot;
+        private ulong _lastCulledCameraVersion;
+        private readonly Stopwatch _cullingStopwatch = new();
+        private const float NearUpdateDistanceSq = 2200f * 2200f;
+        private const float MidUpdateDistanceSq = 4200f * 4200f;
+        private const float FarUpdateDistanceSq = 6200f * 6200f;
+        private const int ParallelVisibleRebuildThreshold = 220;
+        private const int ParallelDirtyRefreshThreshold = 80;
+        private const int SpatialSectorTileSize = 16;
+        private const int SpatialSectorsPerAxis = Constants.TERRAIN_SIZE / SpatialSectorTileSize;
+        private const int SpatialInvalidSector = -1;
+        private const int SpatialRebuildPaddingSectors = 1;
+        private static readonly ParallelOptions VisibleParallelOptions = new()
+        {
+            MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1)
+        };
+        private readonly List<WorldObject>[,] _spatialSectors = new List<WorldObject>[SpatialSectorsPerAxis, SpatialSectorsPerAxis];
+        private readonly List<WorldObject> _spatialOffGridObjects = [];
+        private readonly Dictionary<WorldObject, int> _spatialObjectSectors = [];
+        private readonly List<WorldObject> _spatialCandidates = [];
+        private readonly HashSet<WorldObject> _spatialCandidateSet = [];
 
         public Dictionary<ushort, WalkerObject> WalkerObjectsById { get; } = [];
 
@@ -164,6 +228,11 @@ namespace Client.Main.Controls
         public IReadOnlyList<PlayerObject> Players => _players;
         public IReadOnlyList<MonsterObject> Monsters => _monsters;
         public IReadOnlyList<DroppedItemObject> DroppedItems => _droppedItems;
+        public ulong LastCullCameraVersion => _lastCulledCameraVersion;
+        public int LastCullCandidateCount { get; private set; }
+        public int LastCullVisibleCount { get; private set; }
+        public float LastCullRebuildMs { get; private set; }
+        public bool LastCullWasRebuild { get; private set; }
 
         public Type[] MapTileObjects { get; } = new Type[Constants.TERRAIN_SIZE];
 
@@ -194,12 +263,44 @@ namespace Client.Main.Controls
             Objects.ControlAdded += OnObjectAdded;
             Objects.ControlRemoved += OnObjectRemoved;
 
-            Camera.Instance.CameraMoved += Camera_Moved;
+            for (int y = 0; y < SpatialSectorsPerAxis; y++)
+            {
+                for (int x = 0; x < SpatialSectorsPerAxis; x++)
+                {
+                    _spatialSectors[x, y] = new List<WorldObject>(16);
+                }
+            }
         }
 
-        private void Camera_Moved(object sender, EventArgs e)
+        private void Object_PositionChanged(object sender, EventArgs e)
         {
-            _dirtyVisibleObjects = true;
+            if (sender is WorldObject obj)
+            {
+                _positionDirtyObjects.Add(obj);
+                UpdateSpatialRegistration(obj);
+            }
+            else
+                _dirtyVisibleObjects = true;
+        }
+
+        private void Object_StatusChanged(object sender, EventArgs e)
+        {
+            if (sender is not WorldObject obj)
+                return;
+
+            if (obj.Status == GameControlStatus.Ready)
+            {
+                _positionDirtyObjects.Add(obj);
+                UpdateSpatialRegistration(obj);
+                return;
+            }
+
+            if (obj.Status == GameControlStatus.Disposed || obj.Status == GameControlStatus.Error)
+            {
+                RemoveVisibleObject(obj);
+                _positionDirtyObjects.Remove(obj);
+                UnregisterSpatialObject(obj);
+            }
         }
 
         // --- Lifecycle Methods ---
@@ -265,6 +366,7 @@ namespace Client.Main.Controls
             base.Update(time);
 
             if (Status != GameControlStatus.Ready) return;
+            LastCullWasRebuild = false;
 
             if (_objectsToInitialize.Count > 0)
             {
@@ -272,36 +374,85 @@ namespace Client.Main.Controls
                 for (int i = 0; i < initCount; i++)
                 {
                     var obj = _objectsToInitialize.Dequeue();
-                    obj.Load().ConfigureAwait(false);
-                }
-            }
-
-            if (_dirtyVisibleObjects)
-            {
-                _visibleObjects.Clear();
-
-                for (var i = 0; i < Objects.Count; i++)
-                {
-                    var obj = Objects[i];
-
-                    if (!obj.Visible)
+                    if (obj == null || !ReferenceEquals(obj.World, this) || obj.Status != GameControlStatus.NonInitialized)
                         continue;
 
-                    if (obj is EffectObject || Camera.Instance.Frustum.Intersects(obj.BoundingBoxWorld))
-                        _visibleObjects.Add(obj);
+                    QueueObjectInitialization(obj);
                 }
-
-                _dirtyVisibleObjects = false;
             }
 
-            var objects = _visibleObjects;
-            for (int i = objects.Count - 1; i >= 0; i--)
-                objects[i].Update(time);
+            // Keep update list current for object movement, but defer full camera recull to end of update
+            // so rendering uses the latest camera state from this frame.
+            if (_positionDirtyObjects.Count > 0 && !_dirtyVisibleObjects)
+            {
+                RefreshDirtyVisibleObjects();
+            }
+
+            UpdateVisibleObjects(time);
+
+            ulong cameraVersion = Camera.Instance.StateVersion;
+            bool needsFullRebuild =
+                _dirtyVisibleObjects ||
+                _spatialObjectSectors.Count != Objects.Count ||
+                _lastCulledCameraVersion != cameraVersion ||
+                !_hasVisibilitySnapshot;
+
+            if (needsFullRebuild)
+            {
+                RebuildVisibleObjects();
+                _dirtyVisibleObjects = false;
+                _lastCulledCameraVersion = cameraVersion;
+            }
+            else if (_positionDirtyObjects.Count > 0)
+            {
+                RefreshDirtyVisibleObjects();
+            }
+        }
+
+        private void QueueObjectInitialization(WorldObject obj)
+        {
+            if (obj == null || obj.Status != GameControlStatus.NonInitialized)
+                return;
+
+            bool queued = MuGame.TaskScheduler?.QueueTask(
+                () => LoadInitializedObjectAsync(obj),
+                Controllers.TaskScheduler.Priority.Low) == true;
+
+            if (!queued)
+            {
+                _ = LoadInitializedObjectAsync(obj);
+            }
+        }
+
+        private async Task LoadInitializedObjectAsync(WorldObject obj)
+        {
+            try
+            {
+                await obj.Load();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Failed to initialize world object {ObjectType} ({NetworkId:X4}).", obj.GetType().Name, obj.NetworkId);
+                MuGame.ScheduleOnMainThread(() =>
+                {
+                    if (ReferenceEquals(obj.World, this))
+                    {
+                        RemoveObject(obj);
+                    }
+
+                    if (obj.Status != GameControlStatus.Disposed)
+                    {
+                        obj.Dispose();
+                    }
+                });
+            }
         }
 
         public override void Draw(GameTime time)
         {
             if (Status != GameControlStatus.Ready) return;
+
+            OverheadNameplateRenderer.BeginFrame();
 
             // Build shadow map before any backbuffer drawing so terrain tiles aren't lost
             if (EnableShadows && Constants.ENABLE_SHADOW_MAPPING && GraphicsManager.Instance.ShadowMapRenderer != null)
@@ -343,6 +494,8 @@ namespace Client.Main.Controls
         {
             e.Control.World = this;
             e.Control.HiddenChanged += Object_HiddenChanged;
+            e.Control.PositionChanged += Object_PositionChanged;
+            e.Control.StatusChanged += Object_StatusChanged;
 
             TrackObjectType(e.Control);
             if (e.Control is WalkerObject walker &&
@@ -361,14 +514,22 @@ namespace Client.Main.Controls
                 WalkerObjectsById[walker.NetworkId] = walker; // Always update/add
             }
 
-            _visibleObjects.Add(e.Control);
+            RegisterSpatialObject(e.Control);
+            _positionDirtyObjects.Add(e.Control);
+            if (e.Control.Status == GameControlStatus.NonInitialized)
+                _objectsToInitialize.Enqueue(e.Control);
         }
 
         private void Object_HiddenChanged(object sender, EventArgs e)
         {
             var obj = sender as WorldObject;
-            if (obj.Hidden) _visibleObjects.Remove(obj);
-            else _visibleObjects.Add(obj);
+            if (obj == null)
+                return;
+
+            if (obj.Hidden)
+                RemoveVisibleObject(obj);
+            else
+                _positionDirtyObjects.Add(obj);
         }
 
         private void OnObjectRemoved(object sender, ChildrenEventArgs<WorldObject> e)
@@ -394,8 +555,12 @@ namespace Client.Main.Controls
             }
 
             e.Control.HiddenChanged -= Object_HiddenChanged;
+            e.Control.PositionChanged -= Object_PositionChanged;
+            e.Control.StatusChanged -= Object_StatusChanged;
 
-            _visibleObjects.Remove(e.Control);
+            RemoveVisibleObject(e.Control);
+            _positionDirtyObjects.Remove(e.Control);
+            UnregisterSpatialObject(e.Control);
         }
 
         private void TrackObjectType(WorldObject obj)
@@ -582,13 +747,23 @@ namespace Client.Main.Controls
 
             // Sort lists
             if (_solidBehind.Count > 1)
-                _solidBehind.Sort(Constants.ENABLE_BATCH_OPTIMIZED_SORTING ? WorldObjectBatchOptimizedAsc.Instance : WorldObjectDepthAsc.Instance);
+            {
+                if (Constants.ENABLE_BATCH_OPTIMIZED_SORTING)
+                    SortSolidListBatchOptimizedAsc(_solidBehind);
+                else
+                    _solidBehind.Sort(WorldObjectDepthAsc.Instance);
+            }
 
             if (_transparentObjects.Count > 1)
                 _transparentObjects.Sort(WorldObjectDepthDesc.Instance);
 
             if (_solidInFront.Count > 1)
-                _solidInFront.Sort(Constants.ENABLE_BATCH_OPTIMIZED_SORTING ? WorldObjectBatchOptimizedAsc.Instance : WorldObjectDepthAsc.Instance);
+            {
+                if (Constants.ENABLE_BATCH_OPTIMIZED_SORTING)
+                    SortSolidListBatchOptimizedAsc(_solidInFront);
+                else
+                    _solidInFront.Sort(WorldObjectDepthAsc.Instance);
+            }
 
 
             // Draws
@@ -600,6 +775,49 @@ namespace Client.Main.Controls
             DrawAfterPass(_solidBehind, DepthStateDefault, time);
             DrawAfterPass(_transparentObjects, DepthStateDepthRead, time);
             DrawAfterPass(_solidInFront, DepthStateDefault, time);
+
+            OverheadNameplateRenderer.FlushQueuedNameplates(GraphicsManager.Instance.Sprite);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int GetRefSortKey(object value)
+            => value == null ? 0 : RuntimeHelpers.GetHashCode(value);
+
+        private void SortSolidListBatchOptimizedAsc(List<WorldObject> list)
+        {
+            _batchSortKeys.Clear();
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                var obj = list[i];
+                if (obj == null)
+                    continue;
+
+                int textureKey = 0;
+                int blendKey = 0;
+                int modelKey = 0;
+                bool isModel = false;
+
+                if (obj is ModelObject model)
+                {
+                    isModel = true;
+                    textureKey = GetRefSortKey(model.GetSortTextureHint());
+                    blendKey = GetRefSortKey(model.BlendState);
+                    modelKey = GetRefSortKey(model.Model);
+                }
+
+                _batchSortKeys[obj] = new WorldObjectBatchSortKey(
+                    textureKey,
+                    blendKey,
+                    modelKey,
+                    obj.Depth,
+                    obj.NetworkId,
+                    i,
+                    isModel);
+            }
+
+            _batchSortComparerAsc.SetKeys(_batchSortKeys);
+            list.Sort(_batchSortComparerAsc);
         }
 
         private void DrawListWithSpriteBatchGrouping(List<WorldObject> list, DepthStencilState depthState, GameTime time)
@@ -608,6 +826,8 @@ namespace Client.Main.Controls
                 return;
 
             SetDepthState(depthState);
+            bool canUseMapInstancing = depthState == DepthStateDefault && Constants.ENABLE_MAP_OBJECT_INSTANCING;
+            bool canUseMonsterCrowdInstancing = depthState == DepthStateDefault;
 
             var spriteBatch = GraphicsManager.Instance.Sprite;
             Helpers.SpriteBatchScope? scope = null;
@@ -630,6 +850,12 @@ namespace Client.Main.Controls
 
                 if (usesSpriteBatch)
                 {
+                    if (canUseMonsterCrowdInstancing && ModelObject.HasPendingMonsterCrowdInstancingBatches())
+                        ModelObject.FlushMonsterCrowdInstancingBatches(this);
+
+                    if (canUseMapInstancing && ModelObject.HasPendingStaticMapInstancingBatches())
+                        ModelObject.FlushStaticMapInstancingBatches(this);
+
                     var blend = obj.BlendState ?? BlendState.AlphaBlend;
                     SamplerState sampler;
                     if (obj is WaterMistParticleSystem || obj is ElfBuffOrbTrail)
@@ -673,6 +899,29 @@ namespace Client.Main.Controls
                     currentSampler = null;
                     currentBatchDepth = null;
 
+                    if (canUseMonsterCrowdInstancing && ModelObject.TryQueueMonsterCrowdForInstancing(obj))
+                    {
+                        if (obj is ModelObject queuedMonster)
+                            queuedMonster.DrawQueuedCrowdInstancingSidePasses(time);
+
+                        obj.RenderOrder = ++_renderCounter;
+                        continue;
+                    }
+
+                    var staticMapQueueResult = canUseMapInstancing
+                        ? ModelObject.TryQueueStaticMapObjectForInstancing(obj)
+                        : ModelObject.StaticMapInstancingQueueResult.None;
+
+                    if (canUseMonsterCrowdInstancing && ModelObject.HasPendingMonsterCrowdInstancingBatches())
+                        ModelObject.FlushMonsterCrowdInstancingBatches(this);
+
+                    if (canUseMapInstancing &&
+                        staticMapQueueResult == ModelObject.StaticMapInstancingQueueResult.None &&
+                        ModelObject.IsStaticMapInstancingPathAvailable() &&
+                        obj is ModelObject mapModel &&
+                        mapModel.IsMapPlacementObject)
+                        ModelObject.RegisterStaticMapInstancingFallback();
+
                     obj.Draw(time);
                 }
 
@@ -680,6 +929,12 @@ namespace Client.Main.Controls
             }
 
             scope?.Dispose();
+
+            if (canUseMonsterCrowdInstancing && ModelObject.HasPendingMonsterCrowdInstancingBatches())
+                ModelObject.FlushMonsterCrowdInstancingBatches(this);
+
+            if (canUseMapInstancing && ModelObject.HasPendingStaticMapInstancingBatches())
+                ModelObject.FlushStaticMapInstancingBatches(this);
         }
 
         private void DrawAfterPass(List<WorldObject> list, DepthStencilState state, GameTime time)
@@ -710,6 +965,445 @@ namespace Client.Main.Controls
                 return false;
 
             return frustum != null && frustum.Contains(obj.BoundingBoxWorld) != ContainmentType.Disjoint;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool ShouldForceVisible(WorldObject obj)
+        {
+            return obj is EffectObject
+                || obj is ElfBuffOrbitingLight
+                || (obj is WalkerObject walker && walker.IsMainWalker);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void AddVisibleObject(WorldObject obj)
+        {
+            if (obj == null)
+                return;
+
+            if (_visibleObjectSet.Add(obj))
+                _visibleObjects.Add(obj);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void RemoveVisibleObject(WorldObject obj)
+        {
+            if (obj == null)
+                return;
+
+            if (_visibleObjectSet.Remove(obj))
+                _visibleObjects.Remove(obj);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int PackSpatialSector(int sectorX, int sectorY) => (sectorY * SpatialSectorsPerAxis) + sectorX;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool TryGetSpatialSector(Vector3 worldPos, out int sectorX, out int sectorY)
+        {
+            int tileX = (int)MathF.Floor(worldPos.X / Constants.TERRAIN_SCALE);
+            int tileY = (int)MathF.Floor(worldPos.Y / Constants.TERRAIN_SCALE);
+
+            if ((uint)tileX >= Constants.TERRAIN_SIZE || (uint)tileY >= Constants.TERRAIN_SIZE)
+            {
+                sectorX = 0;
+                sectorY = 0;
+                return false;
+            }
+
+            sectorX = tileX / SpatialSectorTileSize;
+            sectorY = tileY / SpatialSectorTileSize;
+
+            if ((uint)sectorX >= SpatialSectorsPerAxis || (uint)sectorY >= SpatialSectorsPerAxis)
+            {
+                sectorX = 0;
+                sectorY = 0;
+                return false;
+            }
+
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int ResolveSpatialSector(WorldObject obj)
+        {
+            if (obj == null)
+                return SpatialInvalidSector;
+
+            return TryGetSpatialSector(obj.WorldPosition.Translation, out int sectorX, out int sectorY)
+                ? PackSpatialSector(sectorX, sectorY)
+                : SpatialInvalidSector;
+        }
+
+        private void AddToSpatialBucket(WorldObject obj, int sector)
+        {
+            if (sector == SpatialInvalidSector)
+            {
+                _spatialOffGridObjects.Add(obj);
+                return;
+            }
+
+            int sectorX = sector % SpatialSectorsPerAxis;
+            int sectorY = sector / SpatialSectorsPerAxis;
+            _spatialSectors[sectorX, sectorY].Add(obj);
+        }
+
+        private void RemoveFromSpatialBucket(WorldObject obj, int sector)
+        {
+            if (sector == SpatialInvalidSector)
+            {
+                _spatialOffGridObjects.Remove(obj);
+                return;
+            }
+
+            int sectorX = sector % SpatialSectorsPerAxis;
+            int sectorY = sector / SpatialSectorsPerAxis;
+            _spatialSectors[sectorX, sectorY].Remove(obj);
+        }
+
+        private void RegisterSpatialObject(WorldObject obj)
+        {
+            if (obj == null || _spatialObjectSectors.ContainsKey(obj))
+                return;
+
+            int sector = ResolveSpatialSector(obj);
+            _spatialObjectSectors[obj] = sector;
+            AddToSpatialBucket(obj, sector);
+        }
+
+        private void UnregisterSpatialObject(WorldObject obj)
+        {
+            if (obj == null || !_spatialObjectSectors.TryGetValue(obj, out int oldSector))
+                return;
+
+            RemoveFromSpatialBucket(obj, oldSector);
+            _spatialObjectSectors.Remove(obj);
+        }
+
+        private void UpdateSpatialRegistration(WorldObject obj)
+        {
+            if (obj == null)
+                return;
+
+            if (obj.Status == GameControlStatus.Disposed || obj.Status == GameControlStatus.Error)
+            {
+                UnregisterSpatialObject(obj);
+                return;
+            }
+
+            int newSector = ResolveSpatialSector(obj);
+            if (!_spatialObjectSectors.TryGetValue(obj, out int oldSector))
+            {
+                _spatialObjectSectors[obj] = newSector;
+                AddToSpatialBucket(obj, newSector);
+                return;
+            }
+
+            if (oldSector == newSector)
+                return;
+
+            RemoveFromSpatialBucket(obj, oldSector);
+            AddToSpatialBucket(obj, newSector);
+            _spatialObjectSectors[obj] = newSector;
+        }
+
+        private void RebuildSpatialGridFromSnapshot()
+        {
+            foreach (var pair in _spatialSectors)
+                pair.Clear();
+
+            _spatialOffGridObjects.Clear();
+            _spatialObjectSectors.Clear();
+
+            var snapshot = Objects.GetSnapshot();
+            for (int i = 0; i < snapshot.Count; i++)
+            {
+                var obj = snapshot[i];
+                if (obj == null)
+                    continue;
+
+                int sector = ResolveSpatialSector(obj);
+                _spatialObjectSectors[obj] = sector;
+                AddToSpatialBucket(obj, sector);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void AddSpatialCandidate(WorldObject obj)
+        {
+            if (obj == null)
+                return;
+
+            if (_spatialCandidateSet.Add(obj))
+                _spatialCandidates.Add(obj);
+        }
+
+        private void BuildSpatialCandidates(Vector2 center, float maxViewDistance)
+        {
+            _spatialCandidates.Clear();
+            _spatialCandidateSet.Clear();
+
+            if (!TryGetSpatialSector(new Vector3(center, 0f), out int centerSectorX, out int centerSectorY))
+            {
+                centerSectorX = Math.Clamp((int)MathF.Floor(center.X / Constants.TERRAIN_SCALE) / SpatialSectorTileSize, 0, SpatialSectorsPerAxis - 1);
+                centerSectorY = Math.Clamp((int)MathF.Floor(center.Y / Constants.TERRAIN_SCALE) / SpatialSectorTileSize, 0, SpatialSectorsPerAxis - 1);
+            }
+
+            int sectorRadius = (int)MathF.Ceiling(maxViewDistance / (Constants.TERRAIN_SCALE * SpatialSectorTileSize)) + SpatialRebuildPaddingSectors;
+            int minSectorX = Math.Max(0, centerSectorX - sectorRadius);
+            int maxSectorX = Math.Min(SpatialSectorsPerAxis - 1, centerSectorX + sectorRadius);
+            int minSectorY = Math.Max(0, centerSectorY - sectorRadius);
+            int maxSectorY = Math.Min(SpatialSectorsPerAxis - 1, centerSectorY + sectorRadius);
+
+            for (int sectorY = minSectorY; sectorY <= maxSectorY; sectorY++)
+            {
+                for (int sectorX = minSectorX; sectorX <= maxSectorX; sectorX++)
+                {
+                    var bucket = _spatialSectors[sectorX, sectorY];
+                    for (int i = 0; i < bucket.Count; i++)
+                        AddSpatialCandidate(bucket[i]);
+                }
+            }
+
+            for (int i = 0; i < _spatialOffGridObjects.Count; i++)
+                AddSpatialCandidate(_spatialOffGridObjects[i]);
+        }
+
+        private void RebuildVisibleObjects()
+        {
+            _cullingStopwatch.Restart();
+            _visibleObjects.Clear();
+            _visibleObjectSet.Clear();
+            _positionDirtyObjects.Clear();
+
+            var camera = Camera.Instance;
+            var camPos = camera.Position;
+            var cam2 = new Vector2(camPos.X, camPos.Y);
+            float maxViewDistance = camera.ViewFar + Constants.MAX_CAMERA_DISTANCE + 250f;
+            float maxDistSq = maxViewDistance * maxViewDistance;
+            var frustum = camera.Frustum;
+            if (_spatialObjectSectors.Count != Objects.Count)
+            {
+                RebuildSpatialGridFromSnapshot();
+            }
+
+            var focus = camera.Target;
+            BuildSpatialCandidates(new Vector2(focus.X, focus.Y), maxViewDistance);
+            var snapshot = _spatialCandidates;
+            LastCullCandidateCount = snapshot.Count;
+            bool useParallel = Environment.ProcessorCount > 1 &&
+                               snapshot.Count >= ParallelVisibleRebuildThreshold;
+
+            if (useParallel)
+            {
+                Parallel.For(
+                    0,
+                    snapshot.Count,
+                    VisibleParallelOptions,
+                    () => new List<WorldObject>(32),
+                    (i, _, localVisible) =>
+                    {
+                        var obj = snapshot[i];
+                        if (obj != null && obj.Visible &&
+                            (ShouldForceVisible(obj) || IsObjectInView(obj, cam2, maxDistSq, frustum)))
+                        {
+                            localVisible.Add(obj);
+                        }
+
+                        return localVisible;
+                    },
+                    localVisible =>
+                    {
+                        if (localVisible.Count == 0)
+                            return;
+
+                        lock (_visibleMergeLock)
+                        {
+                            _visibleObjects.AddRange(localVisible);
+                        }
+                    });
+            }
+            else
+            {
+                for (int i = 0; i < snapshot.Count; i++)
+                {
+                    var obj = snapshot[i];
+                    if (obj == null || !obj.Visible)
+                        continue;
+
+                    if (ShouldForceVisible(obj) || IsObjectInView(obj, cam2, maxDistSq, frustum))
+                        _visibleObjects.Add(obj);
+                }
+            }
+
+            for (int i = 0; i < _visibleObjects.Count; i++)
+            {
+                var obj = _visibleObjects[i];
+                if (obj != null)
+                    _visibleObjectSet.Add(obj);
+            }
+
+            _cullingStopwatch.Stop();
+            _hasVisibilitySnapshot = true;
+            LastCullVisibleCount = _visibleObjects.Count;
+            LastCullRebuildMs = (float)_cullingStopwatch.Elapsed.TotalMilliseconds;
+            LastCullWasRebuild = true;
+        }
+
+        private void RefreshDirtyVisibleObjects()
+        {
+            if (_positionDirtyObjects.Count == 0)
+                return;
+
+            var camera = Camera.Instance;
+            var camPos = camera.Position;
+            var cam2 = new Vector2(camPos.X, camPos.Y);
+            float maxViewDistance = camera.ViewFar + Constants.MAX_CAMERA_DISTANCE + 250f;
+            float maxDistSq = maxViewDistance * maxViewDistance;
+            var frustum = camera.Frustum;
+            var dirtySnapshot = new WorldObject[_positionDirtyObjects.Count];
+            _positionDirtyObjects.CopyTo(dirtySnapshot);
+            _positionDirtyObjects.Clear();
+
+            for (int i = 0; i < dirtySnapshot.Length; i++)
+                UpdateSpatialRegistration(dirtySnapshot[i]);
+
+            bool useParallel = Environment.ProcessorCount > 1 &&
+                               dirtySnapshot.Length >= ParallelDirtyRefreshThreshold;
+
+            if (useParallel)
+            {
+                var pendingAdd = new List<WorldObject>(dirtySnapshot.Length);
+                var pendingRemove = new List<WorldObject>(dirtySnapshot.Length);
+
+                Parallel.For(
+                    0,
+                    dirtySnapshot.Length,
+                    VisibleParallelOptions,
+                    () => (add: new List<WorldObject>(16), remove: new List<WorldObject>(16)),
+                    (i, _, local) =>
+                    {
+                        var obj = dirtySnapshot[i];
+                        if (obj == null || !obj.Visible)
+                        {
+                            local.remove.Add(obj);
+                            return local;
+                        }
+
+                        bool inView = ShouldForceVisible(obj) || IsObjectInView(obj, cam2, maxDistSq, frustum);
+                        if (inView)
+                            local.add.Add(obj);
+                        else
+                            local.remove.Add(obj);
+
+                        return local;
+                    },
+                    local =>
+                    {
+                        lock (_visibleMergeLock)
+                        {
+                            if (local.add.Count > 0)
+                                pendingAdd.AddRange(local.add);
+                            if (local.remove.Count > 0)
+                                pendingRemove.AddRange(local.remove);
+                        }
+                    });
+
+                for (int i = 0; i < pendingRemove.Count; i++)
+                    RemoveVisibleObject(pendingRemove[i]);
+
+                for (int i = 0; i < pendingAdd.Count; i++)
+                    AddVisibleObject(pendingAdd[i]);
+            }
+            else
+            {
+                for (int i = 0; i < dirtySnapshot.Length; i++)
+                {
+                    var obj = dirtySnapshot[i];
+                    if (obj == null || !obj.Visible)
+                    {
+                        RemoveVisibleObject(obj);
+                        continue;
+                    }
+
+                    bool inView = ShouldForceVisible(obj) || IsObjectInView(obj, cam2, maxDistSq, frustum);
+                    if (inView)
+                        AddVisibleObject(obj);
+                    else
+                        RemoveVisibleObject(obj);
+                }
+            }
+        }
+
+        private void UpdateVisibleObjects(GameTime time)
+        {
+            var objects = _visibleObjects;
+            if (objects.Count == 0)
+                return;
+
+            var camera = Camera.Instance;
+            var camPos = camera.Position;
+            float camX = camPos.X;
+            float camY = camPos.Y;
+            int frame = MuGame.FrameIndex;
+
+            for (int i = objects.Count - 1; i >= 0; i--)
+            {
+                // _visibleObjects can shrink while objects update/remove themselves.
+                // Guard each access to avoid transient out-of-range exceptions.
+                if ((uint)i >= (uint)objects.Count)
+                    continue;
+
+                var obj = objects[i];
+                if (obj == null || !obj.Visible)
+                    continue;
+
+                if (ShouldAlwaysUpdate(obj))
+                {
+                    obj.SetLowQuality(false);
+                    obj.Update(time);
+                    continue;
+                }
+
+                var pos = obj.WorldPosition.Translation;
+                float dx = camX - pos.X;
+                float dy = camY - pos.Y;
+                float distSq = dx * dx + dy * dy;
+
+                int stride = ResolveUpdateStride(distSq);
+                obj.SetLowQuality(stride > 1);
+
+                if (stride > 1 && ((frame + obj.UpdateOffset) % stride) != 0)
+                    continue;
+
+                obj.Update(time);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool ShouldAlwaysUpdate(WorldObject obj)
+        {
+            if (obj is WalkerObject walker && walker.IsMainWalker)
+                return true;
+
+            if (obj is MonsterObject monster)
+                return monster.IsOneShotPlaying;
+
+            return (obj.Interactive && obj is not MonsterObject)
+                || obj is EffectObject
+                || obj is ElfBuffOrbitingLight
+                || obj is ParticleSystem
+                || obj is DroppedItemObject
+                || (obj is ModelObject mo && mo.RequiresPerFrameWorldUpdate);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int ResolveUpdateStride(float distSq)
+        {
+            if (distSq <= NearUpdateDistanceSq) return 1;
+            if (distSq <= MidUpdateDistanceSq) return 2;
+            if (distSq <= FarUpdateDistanceSq) return 4;
+            return 6;
         }
 
 
@@ -746,6 +1440,15 @@ namespace Client.Main.Controls
             _players.Clear();
             _monsters.Clear();
             _droppedItems.Clear();
+            _visibleObjectSet.Clear();
+            _positionDirtyObjects.Clear();
+            _spatialObjectSectors.Clear();
+            _spatialOffGridObjects.Clear();
+            _spatialCandidates.Clear();
+            _spatialCandidateSet.Clear();
+            _hasVisibilitySnapshot = false;
+            foreach (var bucket in _spatialSectors)
+                bucket.Clear();
 
             sw.Stop();
             var elapsedObjects = sw.ElapsedMilliseconds;
@@ -763,6 +1466,21 @@ namespace Client.Main.Controls
             if (worldObject.Status == GameControlStatus.NonInitialized)
             {
                 _objectsToInitialize.Enqueue(worldObject);
+                return;
+            }
+
+            if (worldObject.Status == GameControlStatus.Ready)
+            {
+                _positionDirtyObjects.Add(worldObject);
+                UpdateSpatialRegistration(worldObject);
+                return;
+            }
+
+            if (worldObject.Status == GameControlStatus.Disposed || worldObject.Status == GameControlStatus.Error)
+            {
+                RemoveVisibleObject(worldObject);
+                _positionDirtyObjects.Remove(worldObject);
+                UnregisterSpatialObject(worldObject);
             }
         }
     }

@@ -7,6 +7,7 @@ using Client.Main.Objects.Wings;
 using Microsoft.Xna.Framework;
 using System;
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Client.Main.Objects
@@ -42,7 +43,8 @@ namespace Client.Main.Objects
             if (action == null) return; // Skip animation if action is null
 
             int totalFrames = Math.Max(action.LockPositions ? action.NumAnimationKeys - 1 : action.NumAnimationKeys, 1);
-            float delta = (float)gameTime.ElapsedGameTime.TotalSeconds;
+            float frameDelta = (float)gameTime.ElapsedGameTime.TotalSeconds;
+            bool actionChanged = _priorActionIndex != currentActionIndex;
 
             // Detect death action for walkers to clamp on second-to-last key
             bool isDeathAction = false;
@@ -66,7 +68,7 @@ namespace Client.Main.Objects
 
             if (totalFrames == 1 && !ContinuousAnimation)
             {
-                if (_priorActionIndex != currentActionIndex)
+                if (actionChanged)
                 {
                     GenerateBoneMatrix(currentActionIndex, 0, 0, 0);
                     _priorActionIndex = currentActionIndex;
@@ -76,7 +78,7 @@ namespace Client.Main.Objects
                 return;
             }
 
-            if (_priorActionIndex != currentActionIndex)
+            if (actionChanged)
             {
                 _blendFromAction = _priorActionIndex;
                 _blendFromTime = _animTime;
@@ -85,6 +87,12 @@ namespace Client.Main.Objects
                 _animTime = 0.0;
 
                 // _blendFromBones is pre-allocated in LoadContent - no need to allocate here
+            }
+
+            if (!TryConsumeAnimationDelta(frameDelta, actionChanged, out float delta))
+            {
+                _priorActionIndex = currentActionIndex;
+                return;
             }
 
             _animTime += delta * (action.PlaySpeed == 0 ? 1.0f : action.PlaySpeed) * AnimationSpeed;
@@ -157,6 +165,33 @@ namespace Client.Main.Objects
             _priorActionIndex = currentActionIndex;
         }
 
+        private bool TryConsumeAnimationDelta(float frameDelta, bool forceStep, out float animationDelta)
+        {
+            animationDelta = 0f;
+
+            if (!float.IsFinite(frameDelta) || frameDelta <= 0f)
+                return false;
+
+            if (forceStep)
+            {
+                _animationStepAccumulatorSeconds = 0f;
+                animationDelta = frameDelta;
+                return true;
+            }
+
+            int animationUpdateFps = Constants.ClampPerformanceFps(Constants.ANIMATION_UPDATE_FPS);
+            float animationStepInterval = 1f / animationUpdateFps;
+
+            _animationStepAccumulatorSeconds = MathF.Min(_animationStepAccumulatorSeconds + frameDelta, 0.5f);
+            int availableSteps = (int)(_animationStepAccumulatorSeconds / animationStepInterval);
+            if (availableSteps <= 0)
+                return false;
+
+            animationDelta = availableSteps * animationStepInterval;
+            _animationStepAccumulatorSeconds -= animationDelta;
+            return animationDelta > 0f;
+        }
+
         protected void GenerateBoneMatrix(int actionIdx, int frame0, int frame1, float t)
         {
             var bones = Model?.Bones;
@@ -165,6 +200,7 @@ namespace Client.Main.Objects
             {
                 // Reset animation cache for invalid models
                 _animationStateValid = false;
+                _animationSampleValid = false;
                 return;
             }
 
@@ -173,22 +209,35 @@ namespace Client.Main.Objects
             {
                 _animationStateValid = true;
                 _lastAnimationState = default;
+                _animationSampleActionIndex = actionIdx;
+                _animationSampleFrame0 = frame0;
+                _animationSampleFrame1 = frame1;
+                _animationSampleInterpolationBucket = QuantizeAnimationInterpolation(t);
+                _animationSampleValid = true;
                 return;
             }
 
             if (Model.Actions == null || Model.Actions.Length == 0)
             {
                 _animationStateValid = false;
+                _animationSampleValid = false;
                 return;
             }
 
             actionIdx = Math.Clamp(actionIdx, 0, Model.Actions.Length - 1);
             var action = Model.Actions[actionIdx];
+            _animationSampleActionIndex = actionIdx;
+            _animationSampleFrame0 = frame0;
+            _animationSampleFrame1 = frame1;
+            _animationSampleInterpolationBucket = QuantizeAnimationInterpolation(t);
+            _animationSampleValid = true;
 
             // Create animation state for comparison - only for animated objects
             LocalAnimationState currentAnimState = default;
-            bool shouldCheckCache = !LinkParentAnimation && ParentBoneLink < 0 &&
-                                   action.NumAnimationKeys > 1; // Only cache animated objects
+            bool shouldCheckCache = !RequiresPerFrameAnimation &&
+                                   !LinkParentAnimation &&
+                                   ParentBoneLink < 0 &&
+                                   action.NumAnimationKeys > 1; // Only cache non-critical animated objects
 
             if (shouldCheckCache)
             {
@@ -328,24 +377,8 @@ namespace Client.Main.Objects
                 if (anyBoneChanged || forceUpdate)
                 {
                     Array.Copy(tempBoneTransforms, BoneTransform, bones.Length);
-
-                    // Always invalidate animation for walkers (players/monsters/NPCs) to preserve smooth pacing
-                    bool isImportantObject = RequiresPerFrameAnimation;
-                    if (forceUpdate || isImportantObject)
-                    {
-                        InvalidateBuffers(BUFFER_FLAG_ANIMATION);
-                    }
-                    else
-                    {
-                        // Only throttle animation updates for non-critical objects (NPCs, monsters)
-                        const double ANIMATION_UPDATE_INTERVAL_MS = 20; // Max 20 Hz for non-critical objects
-
-                        if (_lastFrameTimeMs - _lastAnimationUpdateTime > ANIMATION_UPDATE_INTERVAL_MS)
-                        {
-                            InvalidateBuffers(BUFFER_FLAG_ANIMATION);
-                            _lastAnimationUpdateTime = _lastFrameTimeMs;
-                        }
-                    }
+                    _animationPoseVersion++;
+                    InvalidateBuffers(BUFFER_FLAG_ANIMATION);
                 }
 
                 // Always update cache for objects that should use it
@@ -366,6 +399,12 @@ namespace Client.Main.Objects
                 // clearArray: false because we don't need to zero out Matrix structs (performance)
                 _matrixArrayPool.Return(tempBoneTransforms, clearArray: false);
             }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int QuantizeAnimationInterpolation(float t)
+        {
+            return (int)MathHelper.Clamp(MathF.Round(t * 255f), 0f, 255f);
         }
 
         /// <summary>

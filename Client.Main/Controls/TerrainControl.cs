@@ -2,6 +2,7 @@ using Client.Data.ATT;
 using Client.Data.MAP;
 using Client.Main.Controls.Terrain;
 using Client.Main.Graphics;
+using Client.Main.Objects;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using System;
@@ -32,7 +33,15 @@ namespace Client.Main.Controls
         public Vector3 LightDirection { get; set; } = Vector3.Normalize(-SunCycleManager.BaseSunDirection);
         public IReadOnlyList<DynamicLight> DynamicLights => _lightManager.DynamicLights;
         public IReadOnlyList<DynamicLightSnapshot> ActiveLights => _lightManager.ActiveLights;
+        public IReadOnlyList<DynamicLightSnapshot> VisibleLights => _lightManager.VisibleLights;
         public int ActiveLightsVersion => _lightManager.ActiveLightsVersion;
+        public int VisibleLightsVersion => _lightManager.VisibleLightsVersion;
+        public int DynamicLightsOrphansPruned => _lightManager?.OrphanLightsPrunedCount ?? 0;
+        public int DynamicLightsDuplicateAddsRejected => _lightManager?.DuplicateAddsRejectedCount ?? 0;
+        public int LastFrameRegisteredDynamicLights => _lightManager?.LastFrameRegisteredCount ?? 0;
+        public int LastFrameActiveDynamicLights => _lightManager?.LastFrameActiveCount ?? 0;
+        public int LastFrameVisibleDynamicLights => _lightManager?.LastFrameVisibleCount ?? 0;
+        public int LastUploadedDynamicLights => _renderer?.LastUploadedDynamicLights ?? 0;
         public Texture2D HeightMapTexture => _data?.HeightMapTexture;
         private Dictionary<int, string> _pendingTextureMap = new();
         private bool _replaceTextureMapping;
@@ -80,6 +89,8 @@ namespace Client.Main.Controls
                 }
             }
 
+            _grassRenderer.BuildAllGrass();
+
             Console.WriteLine($"[TerrainControl] ConfigureGrass for World{WorldIndex} - Brightness: {oldBrightness:F2} → {brightness:F2}, TextureIndices: [{string.Join(", ", textureIndices ?? new byte[] { 0 })}]");
         }
 
@@ -90,6 +101,7 @@ namespace Client.Main.Controls
         public void ReloadGrassIfNeeded()
         {
             _grassRenderer?.EnsureContentLoaded(WorldIndex);
+            _grassRenderer?.BuildAllGrass();
         }
         public TerrainFrameMetrics FrameMetrics { get; } = new TerrainFrameMetrics();
 
@@ -136,6 +148,7 @@ namespace Client.Main.Controls
 
             // Reset grass to defaults before loading world-specific content
             _grassRenderer.LoadContent(WorldIndex);
+            _grassRenderer.BuildAllGrass();
 
             Camera.Instance.AspectRatio = GraphicsDevice.Viewport.AspectRatio;
 
@@ -202,11 +215,13 @@ namespace Client.Main.Controls
         }
 
         // --- Light Management (Facade) ---
-        public void AddDynamicLight(DynamicLight light) => _lightManager.AddDynamicLight(light);
-        public void RemoveDynamicLight(DynamicLight light) => _lightManager.RemoveDynamicLight(light);
+        public void AddDynamicLight(DynamicLight light) => _lightManager?.AddDynamicLight(light);
+        public void RemoveDynamicLight(DynamicLight light) => _lightManager?.RemoveDynamicLight(light);
+        public void RemoveDynamicLightsByOwner(WorldObject owner) => _lightManager?.RemoveDynamicLightsByOwner(owner);
 
         public override void Dispose()
         {
+            _grassRenderer?.Dispose();
             base.Dispose();
             _data = null; // Allow GC to collect all data
             GC.SuppressFinalize(this);
