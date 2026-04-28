@@ -2,6 +2,7 @@ using Client.Main.Content;
 using Client.Main.Models;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using System.Threading;
 
 namespace Client.Main.Objects.Vehicle;
 
@@ -33,7 +34,8 @@ public class VehicleObject : ModelObject
         {
             if (itemIndex == value) return;
             itemIndex = value;
-            _ = OnChangeIndex();
+            int changeVersion = Interlocked.Increment(ref _changeVersion);
+            _ = OnChangeIndex(itemIndex, changeVersion);
         }
     }
 
@@ -55,6 +57,7 @@ public class VehicleObject : ModelObject
     private int runActionIndex = DefaultAnimationRun;
     private int skillActionIndex = DefaultAnimationSkill;
     private Dictionary<int, float> actionPlaySpeedOverrides;
+    private int _changeVersion;
 
     public VehicleObject()
     {
@@ -69,26 +72,60 @@ public class VehicleObject : ModelObject
         AnimationSpeed = 25f;
     }
 
-    private async Task OnChangeIndex()
+    private bool IsCurrentChangeVersion(int changeVersion)
     {
-        if (ItemIndex < 0)
+        return Volatile.Read(ref _changeVersion) == changeVersion;
+    }
+
+    private void UpdateStatusAfterAsyncResolve(bool modelResolved)
+    {
+        if (Status is not (GameControlStatus.Ready or GameControlStatus.Error))
+            return;
+
+        Status = modelResolved ? GameControlStatus.Ready : GameControlStatus.Error;
+    }
+
+    private void ResetVehicleConfiguration()
+    {
+        RiderHeightOffset = 0f;
+        AnimationSpeedMultiplier = 1.0f;
+        idleAnimationSpeedMultiplier = 1.0f;
+        runAnimationSpeedMultiplier = 1.0f;
+        skillAnimationSpeedMultiplier = 1.0f;
+        idleActionIndex = DefaultAnimationIdle;
+        runActionIndex = DefaultAnimationRun;
+        skillActionIndex = DefaultAnimationSkill;
+        actionPlaySpeedOverrides = null;
+    }
+
+    private async Task OnChangeIndex(short requestedItemIndex, int changeVersion)
+    {
+        if (!IsCurrentChangeVersion(changeVersion))
+            return;
+
+        if (requestedItemIndex < 0)
         {
             Model = null;
-            RiderHeightOffset = 0f;
-            AnimationSpeedMultiplier = 1.0f;
-            idleAnimationSpeedMultiplier = 1.0f;
-            runAnimationSpeedMultiplier = 1.0f;
-            skillAnimationSpeedMultiplier = 1.0f;
-            idleActionIndex = DefaultAnimationIdle;
-            runActionIndex = DefaultAnimationRun;
-            skillActionIndex = DefaultAnimationSkill;
-            actionPlaySpeedOverrides = null;
+            ResetVehicleConfiguration();
             return;
         }
-        VehicleDefinition riderDefinition = VehicleDatabase.GetVehicleDefinition(itemIndex);
-        if (riderDefinition == null) return;
 
-        // Store configuration from definition
+        VehicleDefinition riderDefinition = VehicleDatabase.GetVehicleDefinition(requestedItemIndex);
+        if (riderDefinition == null)
+        {
+            Model = null;
+            ResetVehicleConfiguration();
+            UpdateStatusAfterAsyncResolve(false);
+            return;
+        }
+
+        string modelPath = riderDefinition.TexturePath;
+        var resolvedModel = await BMDLoader.Instance.Prepare(Path.Combine("Skill", modelPath));
+
+        if (!IsCurrentChangeVersion(changeVersion))
+            return;
+
+        // Apply configuration from the winning request only.
         RiderHeightOffset = riderDefinition.RiderHeightOffset;
         AnimationSpeedMultiplier = riderDefinition.AnimationSpeedMultiplier;
         AnimationSpeed = riderDefinition.AnimationSpeed;
@@ -100,29 +137,22 @@ public class VehicleObject : ModelObject
         skillActionIndex = riderDefinition.SkillActionIndex;
         actionPlaySpeedOverrides = riderDefinition.ActionPlaySpeedOverrides;
 
-        string modelPath = riderDefinition.TexturePath;
-
-        Model = await BMDLoader.Instance.Prepare(Path.Combine("Skill", modelPath));
-
-        if (Model == null)
+        Model = resolvedModel;
+        if (resolvedModel == null)
         {
-            Status = GameControlStatus.Error;
+            UpdateStatusAfterAsyncResolve(false);
+            return;
         }
-        else
+
+        UpdateStatusAfterAsyncResolve(true);
+
+        // Apply animation speed multiplier to all actions
+        ApplyAnimationSpeedMultiplier();
+
+        // For vehicles with root motion in their animations, lock positions to prevent drifting
+        if (VehiclesWithRootMotion.Contains(requestedItemIndex))
         {
-            if (Status == GameControlStatus.Error)
-            {
-                Status = GameControlStatus.Ready;
-            }
-
-            // Apply animation speed multiplier to all actions
-            ApplyAnimationSpeedMultiplier();
-
-            // For vehicles with root motion in their animations, lock positions to prevent drifting
-            if (VehiclesWithRootMotion.Contains(itemIndex))
-            {
-                ApplyPositionLockToAnimations();
-            }
+            ApplyPositionLockToAnimations();
         }
     }
 

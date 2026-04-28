@@ -79,6 +79,12 @@ namespace Client.Main.Networking.PacketHandling.Handlers
                 var info = new ConnectionInfo(packet);
                 string ip = info.IpAddress;
                 ushort port = info.Port;
+                if (string.Equals(ip, "127.127.127.127", StringComparison.Ordinal))
+                {
+                    _logger.LogInformation("Rewriting game server IP {Original} -> 127.0.0.1 (macOS Docker).", ip);
+                    ip = "127.0.0.1";
+                }
+
                 _logger.LogInformation("Game server address: {IP}:{Port}", ip, port);
                 _networkManager.SwitchToGameServer(ip, port);
             }

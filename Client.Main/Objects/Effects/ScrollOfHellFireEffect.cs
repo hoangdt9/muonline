@@ -25,6 +25,7 @@ namespace Client.Main.Objects.Effects
 
         private const float CircleLifeFrames = 45f;
         private const float CircleLightLifeFrames = 40f;
+        private const float TotalLifeFrames = CircleLifeFrames;
 
         private Vector3 _center;
         private readonly WalkerObject _caster;
@@ -37,13 +38,17 @@ namespace Client.Main.Objects.Effects
         private HellFireCircleModel? _circle;
         private HellFireCircleLightModel? _circleLight;
         private readonly DynamicLight _impactLight;
+        private TerrainControl? _lightTerrain;
         private bool _lightsAdded;
+        private bool _effectSpawned;
+        private float _lifeFrames = TotalLifeFrames;
         private float _time;
 
         public ScrollOfHellFireEffect(WalkerObject caster, Vector3 center)
         {
             _caster = caster ?? throw new ArgumentNullException(nameof(caster));
             _center = center;
+            Position = center;
 
             IsTransparent = true;
             AffectedByTransparency = true;
@@ -68,12 +73,6 @@ namespace Client.Main.Objects.Effects
         {
             await base.LoadContent();
             await ResolvePaths();
-
-            if (World?.Terrain != null && !_lightsAdded)
-            {
-                World.Terrain.AddDynamicLight(_impactLight);
-                _lightsAdded = true;
-            }
         }
 
         public override void Update(GameTime gameTime)
@@ -86,17 +85,31 @@ namespace Client.Main.Objects.Effects
             if (Status != GameControlStatus.Ready)
                 return;
 
+            EnsureDynamicLightAttached();
+
             if (_caster.Status == GameControlStatus.Disposed || _caster.World == null)
             {
+                DetachDynamicLight();
                 RemoveSelf();
                 return;
             }
 
-            if (_circle == null && World != null)
+            if (!_effectSpawned && World != null)
+            {
                 SpawnCircleEffects();
+                _effectSpawned = true;
+            }
 
+            float factor = FPSCounter.Instance.FPS_ANIMATION_FACTOR;
+            _lifeFrames -= factor;
             UpdateCircleLightStones();
             UpdateDynamicLight((float)gameTime.ElapsedGameTime.TotalSeconds);
+
+            if ((_effectSpawned && AreCircleEffectsFinished()) || _lifeFrames <= 0f)
+            {
+                DetachDynamicLight();
+                RemoveSelf();
+            }
         }
 
         private async Task ResolvePaths()
@@ -193,11 +206,24 @@ namespace Client.Main.Objects.Effects
 
             bool active = (_circle != null && _circle.Status == GameControlStatus.Ready)
                 || (_circleLight != null && _circleLight.Status == GameControlStatus.Ready);
+            float lifeAlpha = MathHelper.Clamp(_lifeFrames / TotalLifeFrames, 0f, 1f);
 
             float pulse = 0.8f + 0.2f * MathF.Sin(_time * 10f);
             _impactLight.Position = _center;
-            _impactLight.Intensity = active ? 1.4f * pulse : 0f;
+            _impactLight.Intensity = active ? 1.4f * lifeAlpha * pulse : 0f;
             _impactLight.Radius = 260f + 40f * MathF.Sin(_time * 6f);
+        }
+
+        private bool AreCircleEffectsFinished()
+        {
+            return IsEffectPartFinished(_circle) && IsEffectPartFinished(_circleLight);
+        }
+
+        private static bool IsEffectPartFinished(WorldObject? effectPart)
+        {
+            return effectPart == null
+                || effectPart.Status == GameControlStatus.Disposed
+                || effectPart.Status == GameControlStatus.Error;
         }
 
         private static async Task<string> ResolveIndexedModelPath(string baseName, int index, string fallback)
@@ -218,6 +244,8 @@ namespace Client.Main.Objects.Effects
 
         private void RemoveSelf()
         {
+            DetachDynamicLight();
+
             if (Parent != null)
                 Parent.Children.Remove(this);
             else
@@ -228,13 +256,35 @@ namespace Client.Main.Objects.Effects
 
         public override void Dispose()
         {
-            if (_lightsAdded && World?.Terrain != null)
-            {
-                World.Terrain.RemoveDynamicLight(_impactLight);
-                _lightsAdded = false;
-            }
+            DetachDynamicLight();
 
             base.Dispose();
+        }
+
+        private void DetachDynamicLight()
+        {
+            if (!_lightsAdded)
+                return;
+
+            TerrainControl? terrain = _lightTerrain ?? World?.Terrain;
+            terrain?.RemoveDynamicLight(_impactLight);
+            terrain?.RemoveDynamicLightsByOwner(this);
+            _lightsAdded = false;
+            _lightTerrain = null;
+        }
+
+        private void EnsureDynamicLightAttached()
+        {
+            if (_lightsAdded || Status != GameControlStatus.Ready)
+                return;
+
+            TerrainControl? terrain = World?.Terrain;
+            if (terrain == null)
+                return;
+
+            _lightTerrain = terrain;
+            _lightTerrain.AddDynamicLight(_impactLight);
+            _lightsAdded = true;
         }
 
         private sealed class HellFireCircleModel : ModelObject

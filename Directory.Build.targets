@@ -1,0 +1,11 @@
+<Project>
+  <!-- MonoGame.Content.Builder.Task 3.8.4.1 invokes `dotnet mgcb`, which fails with .NET 10 local tools in this repo. Prefer global `dotnet tool install -g dotnet-mgcb` shim when present. -->
+  <Target Name="MuOnlineUseGlobalMgcb" BeforeTargets="RunContentBuilder">
+    <PropertyGroup>
+      <_GlobalMgcb>$([System.Environment]::GetFolderPath(SpecialFolder.UserProfile))/.dotnet/tools/mgcb</_GlobalMgcb>
+    </PropertyGroup>
+    <PropertyGroup Condition="Exists('$(_GlobalMgcb)')">
+      <_Command>&quot;$(_GlobalMgcb)&quot;</_Command>
+    </PropertyGroup>
+  </Target>
+</Project>

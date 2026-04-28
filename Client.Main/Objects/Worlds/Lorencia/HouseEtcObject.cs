@@ -8,6 +8,8 @@ namespace Client.Main.Objects.Worlds.Lorencia
 {
     public class HouseEtcObject : ModelObject
     {
+        // These walls rely on the regular per-mesh path to preserve partially transparent sections.
+        protected override bool AllowMapObjectInstancing => false;
         public HouseEtcObject()
         {
             LightEnabled = true;

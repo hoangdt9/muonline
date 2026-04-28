@@ -182,13 +182,10 @@ namespace Client.Main.Objects.Effects
             if (obj.Parent != null)
             {
                 obj.Parent.Children.Remove(obj);
-                return;
             }
-
-            if (obj.World != null)
+            else if (obj.World != null)
             {
-                obj.World.Objects.Remove(obj);
-                return;
+                obj.World.RemoveObject(obj);
             }
 
             obj.Dispose();

@@ -12,6 +12,7 @@ namespace Client.Main.Objects.Worlds.Login
         private const float TEXTURE_SCROLL_SPEED = 0.1f; // Texture scroll speed for ship water effect
         private double _accumulatedTime = 0.0;
         private BMDTexCoord[][] _originalTexCoords;
+        protected override bool UsesMutableMeshData => true;
 
         public override async Task Load()
         {

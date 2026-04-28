@@ -673,10 +673,7 @@ namespace Client.Main.Objects.Player
             var wingsDef = GetItemDef(InventoryConstants.WingsSlot);
             if (wingsDef != null && !string.IsNullOrEmpty(wingsDef.TexturePath))
             {
-                EquippedWings.Hidden = false;
-                EquippedWings.Type = 0;
-                EquippedWings.ItemIndex = (short)wingsDef.Id;
-                EquippedWings.LinkParentAnimation = false;
+                ShowEquippedWings((short)wingsDef.Id);
             }
             else
             {
@@ -687,23 +684,16 @@ namespace Client.Main.Objects.Player
                     var mappedIndex = TryMapWingAppearanceToItemIndex(Appearance.WingInfo, CharacterClass);
                     if (mappedIndex.HasValue)
                     {
-                        EquippedWings.Hidden = false;
-                        EquippedWings.Type = 0;
-                        EquippedWings.ItemIndex = mappedIndex.Value;
-                        EquippedWings.LinkParentAnimation = false;
+                        ShowEquippedWings(mappedIndex.Value);
                     }
                     else
                     {
-                        EquippedWings.Hidden = true;
-                        EquippedWings.Type = 0;
-                        EquippedWings.ItemIndex = -1;
+                        HideEquippedWings();
                     }
                 }
                 else
                 {
-                    EquippedWings.Hidden = true;
-                    EquippedWings.Type = 0;
-                    EquippedWings.ItemIndex = -1;
+                    HideEquippedWings();
                 }
             }
 
@@ -848,23 +838,16 @@ namespace Client.Main.Objects.Player
                 var mappedIndex = TryMapWingAppearanceToItemIndex(Appearance.WingInfo, CharacterClass);
                 if (mappedIndex.HasValue)
                 {
-                    EquippedWings.Hidden = false;
-                    EquippedWings.Type = 0;
-                    EquippedWings.ItemIndex = mappedIndex.Value;
-                    EquippedWings.LinkParentAnimation = false;
+                    ShowEquippedWings(mappedIndex.Value);
                 }
                 else
                 {
-                    EquippedWings.Hidden = true;
-                    EquippedWings.Type = 0;
-                    EquippedWings.ItemIndex = -1;
+                    HideEquippedWings();
                 }
             }
             else
             {
-                EquippedWings.Hidden = true;
-                EquippedWings.Type = 0;
-                EquippedWings.ItemIndex = -1;
+                HideEquippedWings();
             }
             // Weapons
             // This requires more sophisticated logic to determine the exact weapon model
@@ -1053,13 +1036,11 @@ namespace Client.Main.Objects.Player
             // Wings
             if (appearanceConfig.WingInfo.ItemIndex >= 0)
             {
-                EquippedWings.ItemIndex = appearanceConfig.WingInfo.ItemIndex;
-                EquippedWings.Hidden = false;
-                EquippedWings.LinkParentAnimation = false;
+                ShowEquippedWings(appearanceConfig.WingInfo.ItemIndex);
             }
             else
             {
-                EquippedWings.Hidden = true;
+                HideEquippedWings();
             }
 
             if (appearanceConfig.RidingVehicle >= 0)
@@ -1315,7 +1296,8 @@ namespace Client.Main.Objects.Player
             SetActionSpeed(PlayerAction.PlayerSkillHell, 0.50f + magicSpeed2);
             SetActionSpeed(PlayerAction.PlayerRideSkill, 0.30f + magicSpeed2);
 
-            SetActionSpeed(PlayerAction.PlayerSkillHellBegin, 0.50f + magicSpeed2);
+            // Reference client applies an extra 0.5x multiplier to HELL_BEGIN playback.
+            SetActionSpeed(PlayerAction.PlayerSkillHellBegin, 0.25f + (magicSpeed2 * 0.5f));
             SetActionSpeed(PlayerAction.PlayerAttackStrike, 0.25f + attackSpeed1);
             SetActionSpeed(PlayerAction.PlayerAttackRideStrike, 0.20f + attackSpeed1);
             SetActionSpeed(PlayerAction.PlayerAttackRideHorseSword, 0.25f + attackSpeed1);
@@ -1434,7 +1416,7 @@ namespace Client.Main.Objects.Player
 
             if (!IsMainWalker)
             {
-                desiredStride = IsOneShotPlaying ? 1 : (LowQuality ? 4 : 2);
+                desiredStride = IsOneShotPlaying ? 1 : (LowQuality ? 2 : 1);
             }
 
             if (_lastEquipmentAnimationStride == desiredStride)
@@ -2265,7 +2247,7 @@ namespace Client.Main.Objects.Player
             // Horn of Fenrir variations - check for different colors
             if (itemNameLower.Contains("horn of"))
             {
-                if (itemNameLower.Contains("black") || itemNameLower.Contains("fenrir"))
+                if (itemNameLower.Contains("black"))
                     return 11; // Fenrir Black
                 if (itemNameLower.Contains("blue"))
                     return 12; // Fenrir Blue
@@ -2274,8 +2256,10 @@ namespace Client.Main.Objects.Player
                 if (itemNameLower.Contains("red"))
                     return 14; // Fenrir Red
 
-                // Default Fenrir
-                return 14; // Fenrir Red as default
+                if (itemNameLower.Contains("fenrir"))
+                    return 14; // Default Horn of Fenrir is red
+
+                return 14; // Fenrir Red fallback
             }
 
             return -1; // Not a rideable pet
@@ -3985,9 +3969,7 @@ namespace Client.Main.Objects.Player
                     break;
 
                 case InventoryConstants.WingsSlot:
-                    EquippedWings.Hidden = true;
-                    EquippedWings.Type = 0;
-                    EquippedWings.ItemIndex = -1;
+                    HideEquippedWings();
                     break;
 
                 default:
@@ -4043,20 +4025,34 @@ namespace Client.Main.Objects.Player
             }
         }
 
+        private void ShowEquippedWings(short wingItemIndex)
+        {
+            if (EquippedWings == null)
+                return;
+
+            EquippedWings.LinkParentAnimation = false;
+            EquippedWings.Hidden = false;
+            EquippedWings.ItemIndex = wingItemIndex;
+        }
+
+        private void HideEquippedWings()
+        {
+            if (EquippedWings == null)
+                return;
+
+            EquippedWings.Hidden = true;
+            EquippedWings.ItemIndex = -1;
+        }
+
         private Task UpdateWingsSlotAsync(EquipmentSlotData equipmentData)
         {
             if (equipmentData.ItemGroup == 12)
             {
-                EquippedWings.Hidden = false;
-                EquippedWings.Type = 0;
-                EquippedWings.ItemIndex = (short)equipmentData.ItemNumber;
-                EquippedWings.LinkParentAnimation = false;
+                ShowEquippedWings((short)equipmentData.ItemNumber);
             }
             else
             {
-                EquippedWings.Hidden = true;
-                EquippedWings.Type = 0;
-                EquippedWings.ItemIndex = -1;
+                HideEquippedWings();
             }
 
             return Task.CompletedTask;

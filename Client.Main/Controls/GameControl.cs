@@ -36,6 +36,11 @@ namespace Client.Main.Controls
         public ControlAlign Align { get; set; }
         public bool AutoViewSize { get; set; } = true;
         public bool Interactive { get; set; }
+        /// <summary>
+        /// Allows non-interactive controls to still capture pointer hit-testing in scene input routing.
+        /// Defaults to false to keep click-through behavior for visual-only overlays.
+        /// </summary>
+        public bool CapturePointerWhenNonInteractive { get; set; }
         public int X { get; set; }
         public int Y { get; set; }
         public Point ControlSize { get => _controlSize; set => _controlSize = value; }

@@ -36,42 +36,9 @@ namespace Client.Main.Scenes
 
         public Task ImportPendingNpcsMonstersAsync()
         {
-            if (_scene.World is not WalkableWorldControl w) return Task.CompletedTask;
             var list = ScopeHandler.TakePendingNpcsMonsters();
             if (list.Count == 0) return Task.CompletedTask;
-
-            foreach (var s in list)
-            {
-                if (_activeNpcIds.Contains(s.Id) || _activeMonsterIds.Contains(s.Id)) continue;
-
-                if (!NpcDatabase.TryGetNpcType(s.TypeNumber, out Type objectType)) continue;
-                if (Activator.CreateInstance(objectType) is WalkerObject npcMonster)
-                {
-                    npcMonster.NetworkId = s.Id;
-                    npcMonster.Location = new Vector2(s.PositionX, s.PositionY);
-                    npcMonster.Direction = (Models.Direction)s.Direction;
-                    npcMonster.World = w;
-
-                    MuGame.TaskScheduler.QueueTask(async () =>
-                    {
-                        try
-                        {
-                            await npcMonster.Load();
-                            w.Objects.Add(npcMonster);
-
-                            if (npcMonster is MonsterObject)
-                                _activeMonsterIds.Add(s.Id);
-                            else
-                                _activeNpcIds.Add(s.Id);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger?.LogError(ex, $"Error loading pending NPC/Monster {s.Id:X4}");
-                            npcMonster.Dispose();
-                        }
-                    }, TaskScheduler.Priority.High);
-                }
-            }
+            ScopeHandler.EnqueuePendingNpcsMonsters(list);
 
             return Task.CompletedTask;
         }

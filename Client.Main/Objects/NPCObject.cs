@@ -9,6 +9,7 @@ using Microsoft.Xna.Framework;
 using Client.Main.Models;
 using System;
 using System.Reflection;
+using Microsoft.Xna.Framework.Graphics;
 
 namespace Client.Main.Objects
 {
@@ -67,7 +68,7 @@ namespace Client.Main.Objects
             Boots = new PlayerBootObject { LinkParentAnimation = true };
             Weapon1 = new WeaponObject { };
             Weapon2 = new WeaponObject { };
-            Wings = new WingObject { LinkParentAnimation = true, Hidden = true };
+            Wings = new WingObject { LinkParentAnimation = false, Hidden = true };
 
             Children.Add(HelmMask);
             Children.Add(Helm);
@@ -168,6 +169,35 @@ namespace Client.Main.Objects
                 {
                     _logger?.LogDebug("Model part not found (this is often normal for NPCs): {Path}", modelPath);
                 }
+            }
+        }
+
+        /// <summary>
+        /// Configures shared NPC wing attachment using a single authoritative child object.
+        /// Keeps animation linkage deterministic for player-model NPCs.
+        /// </summary>
+        protected async Task ConfigureNpcWingsAsync(string modelPath, int blendMesh = -1, BlendState blendState = null)
+        {
+            if (Wings == null)
+                return;
+
+            Wings.Hidden = false;
+            // Wings should attach to parent backbone (ParentBoneLink) instead of copying full parent animation,
+            // otherwise wing skeleton can become distorted for player-model NPCs.
+            Wings.LinkParentAnimation = false;
+            Wings.Model = await BMDLoader.Instance.Prepare(modelPath);
+
+            if (Wings.Model == null)
+            {
+                Wings.Hidden = true;
+                _logger?.LogWarning("Could not load NPC wings model: {Path}", modelPath);
+                return;
+            }
+
+            Wings.BlendMesh = blendMesh;
+            if (blendState != null)
+            {
+                Wings.BlendMeshState = blendState;
             }
         }
 

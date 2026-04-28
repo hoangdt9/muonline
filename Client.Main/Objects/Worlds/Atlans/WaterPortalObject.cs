@@ -21,6 +21,7 @@ namespace Client.Main.Objects.Worlds.Atlans
         private BMDTexCoord[] _originalTexCoords;
         private BMDTextureVertex[] _originalVertices;
         private System.Numerics.Vector3[] _vertexOffsets;
+        protected override bool UsesMutableMeshData => true;
 
         public override async Task Load()
         {

@@ -1,4 +1,5 @@
 ﻿using Client.Main.Objects.Effects;
+using Client.Main.Models;
 using Microsoft.Xna.Framework;
 using System.Threading.Tasks;
 
@@ -7,16 +8,24 @@ namespace Client.Main.Objects
     public class CursorObject : WorldObject
     {
         public float _visibleTime = 0f;
+        private bool _effectHierarchyValidated;
 
         public override async Task Load()
         {
             Scale = 0.7f;
-            Children.Add(new MoveTargetPostEffectObject());
+            EnsureSingleMoveTargetEffect();
+            _effectHierarchyValidated = true;
             await base.Load();
         }
 
         public override void Update(GameTime gameTime)
         {
+            if (!_effectHierarchyValidated)
+            {
+                EnsureSingleMoveTargetEffect();
+                _effectHierarchyValidated = true;
+            }
+
             if (_visibleTime > 0)
             {
                 _visibleTime -= gameTime.ElapsedGameTime.Milliseconds;
@@ -36,6 +45,30 @@ namespace Client.Main.Objects
             Hidden = false;
             _visibleTime = 1500f;
             Alpha = 1f;
+        }
+
+        private void EnsureSingleMoveTargetEffect()
+        {
+            MoveTargetPostEffectObject primaryEffect = null;
+
+            for (int i = Children.Count - 1; i >= 0; i--)
+            {
+                if (Children[i] is not MoveTargetPostEffectObject effect)
+                    continue;
+
+                if (primaryEffect == null)
+                {
+                    primaryEffect = effect;
+                    continue;
+                }
+
+                Children.Remove(effect);
+                if (effect.Status != GameControlStatus.Disposed)
+                    effect.Dispose();
+            }
+
+            if (primaryEffect == null)
+                Children.Add(new MoveTargetPostEffectObject());
         }
     }
 }

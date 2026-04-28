@@ -4,6 +4,7 @@ using System.Diagnostics.CodeAnalysis;
 using Client.Main.Controls;
 using Client.Main.Controls.UI;
 using Client.Main.Controls.UI.Game;
+using Client.Main.Controls.UI.Game.Hud;
 using Client.Main.Controls.UI.Game.Map;
 using Client.Main.Models;
 using Client.Main.Objects;
@@ -17,7 +18,7 @@ namespace Client.Main.Scenes
     internal sealed class GameSceneMapController
     {
         private readonly GameScene _scene;
-        private readonly MainControl _main;
+        private readonly GameControl _hud;
         private readonly ProgressBarControl _progressBar;
         private readonly ChatLogWindow _chatLog;
         private readonly ChatInputBoxControl _chatInput;
@@ -33,7 +34,7 @@ namespace Client.Main.Scenes
 
         public GameSceneMapController(
             GameScene scene,
-            MainControl main,
+            GameControl hud,
             ProgressBarControl progressBar,
             ChatLogWindow chatLog,
             ChatInputBoxControl chatInput,
@@ -44,7 +45,7 @@ namespace Client.Main.Scenes
             ILogger logger)
         {
             _scene = scene;
-            _main = main;
+            _hud = hud;
             _progressBar = progressBar;
             _chatLog = chatLog;
             _chatInput = chatInput;
@@ -108,7 +109,7 @@ namespace Client.Main.Scenes
 
             EnsureLoadingScreen($"Loading {worldType.Name}...");
             _loadingScreen.Progress = 0f;
-            _main.Visible = false;
+            _hud.Visible = false;
 
             var previousWorld = _scene.World;
             previousWorld?.Objects.Remove(_scene.Hero);
@@ -157,7 +158,7 @@ namespace Client.Main.Scenes
             {
                 _progressBar.Visible = false;
             }
-            _main.Visible = true;
+            _hud.Visible = true;
             _isChangingWorld = false;
 
             UpdateMapName();

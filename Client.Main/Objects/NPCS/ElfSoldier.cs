@@ -2,7 +2,6 @@ using Client.Data;
 using Client.Main.Content;
 using Client.Main.Models;
 using Client.Main.Objects.Player;
-using Client.Main.Objects.Wings;
 using System.Threading.Tasks;
 using Client.Main.Objects.Effects;
 using Microsoft.Xna.Framework;
@@ -15,18 +14,10 @@ namespace Client.Main.Objects.NPCS
     public class ElfSoldier : NPCObject
     {
         private new readonly ILogger<ElfSoldier> _logger;
-        private WingObject _wings;
 
         public ElfSoldier()
         {
             _logger = AppLoggerFactory?.CreateLogger<ElfSoldier>();
-
-            _wings = new WingObject
-            {
-                BlendMesh = 0,
-                BlendMeshState = Microsoft.Xna.Framework.Graphics.BlendState.Additive
-            };
-            Children.Add(_wings);
         }
 
         public override async Task Load()
@@ -48,7 +39,10 @@ namespace Client.Main.Objects.NPCS
             Gloves.ItemLevel = 11;
             Boots.ItemLevel = 11;
 
-            _wings.Model = await BMDLoader.Instance.Prepare("Item/Wing04.bmd");
+            await ConfigureNpcWingsAsync(
+                "Item/Wing04.bmd",
+                blendMesh: 0,
+                blendState: Microsoft.Xna.Framework.Graphics.BlendState.Additive);
 
             await base.Load();
             

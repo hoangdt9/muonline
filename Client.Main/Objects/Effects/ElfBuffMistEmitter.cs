@@ -18,6 +18,7 @@ namespace Client.Main.Objects.Effects
         private readonly Vector3 _offset;
         private readonly float _baseEmissionRate;
         private readonly DynamicLight _dynamicLight;
+        private TerrainControl _lightTerrain;
         private float _pulseTimer;
         private float _spawnBoostTimer = 0.35f;
         private const float SpawnBoostRate = 32f;
@@ -65,7 +66,8 @@ namespace Client.Main.Objects.Effects
             if (World?.Terrain != null)
             {
                 _dynamicLight.Position = Position;
-                World.Terrain.AddDynamicLight(_dynamicLight);
+                _lightTerrain = World.Terrain;
+                _lightTerrain.AddDynamicLight(_dynamicLight);
             }
         }
 
@@ -164,13 +166,10 @@ namespace Client.Main.Objects.Effects
             if (Parent != null)
             {
                 Parent.Children.Remove(this);
-                return;
             }
-
-            if (World != null)
+            else if (World != null)
             {
                 World.Objects.Remove(this);
-                return;
             }
 
             Dispose();
@@ -178,9 +177,11 @@ namespace Client.Main.Objects.Effects
 
         public override void Dispose()
         {
-            if (World?.Terrain != null && _dynamicLight != null)
+            if (_dynamicLight != null)
             {
-                World.Terrain.RemoveDynamicLight(_dynamicLight);
+                TerrainControl terrain = _lightTerrain ?? World?.Terrain;
+                terrain?.RemoveDynamicLight(_dynamicLight);
+                _lightTerrain = null;
             }
 
             base.Dispose();

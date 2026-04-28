@@ -11,6 +11,8 @@ namespace Client.Main.Objects.Worlds.Lorencia
 {
     public class HouseWallObject : ModelObject
     {
+        // These walls rely on the regular per-mesh path to preserve partially transparent sections.
+        protected override bool AllowMapObjectInstancing => false;
         // Constants
         private const float TARGET_ALPHA = 0.3f;
         private const float FADE_SPEED = 0.3f;

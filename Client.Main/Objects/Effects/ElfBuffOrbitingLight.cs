@@ -140,6 +140,11 @@ namespace Client.Main.Objects.Effects
 
         public override async Task Load()
         {
+            Vector3 ownerPosition = GetOwnerPosition();
+            Vector3 initialDirection = new Vector3(MathF.Cos(_orbitAngle), MathF.Sin(_orbitAngle), 0f);
+            _orbitalOffset = initialDirection * _baseRadius + new Vector3(0f, 0f, _heightOffset);
+            Position = ownerPosition + _orbitalOffset;
+
             await base.Load();
             Children.Add(_trail);
             await _trail.Load();

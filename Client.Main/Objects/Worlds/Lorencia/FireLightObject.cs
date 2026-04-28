@@ -63,7 +63,9 @@ namespace Client.Main.Objects.Worlds.Lorencia
             {
                 Owner = this,
                 Color = new Vector3(1f, 0.7f, 0.4f),
-                Radius = 400f,
+                // GPU dynamic lighting attenuates in full 3D from the flame anchor.
+                // Keep the reach wider so nearby props are lit before the camera gets very close.
+                Radius = Constants.TERRAIN_SCALE * 6.0f,
                 Intensity = 1.5f,
                 Position = Vector3.Zero
             };

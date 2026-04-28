@@ -30,7 +30,9 @@ namespace Client.Main.Objects.Worlds.Lorencia
             {
                 Owner = this,
                 Color = new Vector3(1f, 0.9f, 0.7f), // Warm white light
-                Radius = 300f,   // wider reach so it’s noticeable on terrain/grass
+                // GPU dynamic lighting uses full 3D attenuation from the lamp head,
+                // so the radius needs to account for lamp height as well.
+                Radius = Constants.TERRAIN_SCALE * 5.5f,
                 Intensity = 1.5f,
                 Position = Vector3.Zero
             };

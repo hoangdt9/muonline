@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Logging;
-using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Threading.Tasks;
 
 namespace Client.Main.Controllers
 {
@@ -24,6 +24,10 @@ namespace Client.Main.Controllers
         private long _processedTasks;
         private readonly Stopwatch _uptimeStopwatch = new();
         private readonly Stopwatch _frameStopwatch = new();
+        private int _lastFrameProcessedTasks;
+        private int _lastFrameQueueAtStart;
+        private int _lastFrameQueueRemaining;
+        private double _lastFrameProcessingMs;
 
         // Priority levels
         public enum Priority
@@ -88,25 +92,54 @@ namespace Client.Main.Controllers
         }
 
         /// <summary>
+        /// Queues an asynchronous task and observes failures explicitly.
+        /// </summary>
+        public bool QueueTask(Func<Task> asyncAction, Priority priority = Priority.Normal)
+        {
+            if (asyncAction == null) return false;
+
+            return QueueTask(() =>
+            {
+                Task task = asyncAction();
+                if (!task.IsCompletedSuccessfully)
+                {
+                    _ = ObserveTaskAsync(task, priority);
+                }
+            }, priority);
+        }
+
+        /// <summary>
         /// Processes queued tasks on the main thread. Should be called each frame.
         /// </summary>
-        public void ProcessFrame()
+        public void ProcessFrame(int workScale = 1)
         {
             if (_cts.IsCancellationRequested) return;
+            workScale = Math.Max(1, workScale);
 
             _frameStopwatch.Restart();
             var processedThisFrame = 0;
+            int queuedAtStart = _taskQueue.Count;
+            int maxTasksThisFrame = _maxTasksPerFrame * workScale;
+            TimeSpan maxProcessingTime = TimeSpan.FromTicks(_maxProcessingTimePerFrame.Ticks * workScale);
 
-            while (_taskQueue.Count > 0 && processedThisFrame < _maxTasksPerFrame)
+            // Increase throughput when queue is backing up, still capped by time budget.
+            if (queuedAtStart > 40)
             {
-                if (_frameStopwatch.Elapsed >= _maxProcessingTimePerFrame)
+                int adaptiveCap = 12 * workScale;
+                maxTasksThisFrame = Math.Min(adaptiveCap, maxTasksThisFrame + (queuedAtStart / 25));
+            }
+
+            while (processedThisFrame < maxTasksThisFrame)
+            {
+                if (_frameStopwatch.Elapsed >= maxProcessingTime)
                 {
                     _logger.LogDebug("Frame processing time limit reached ({ElapsedMs}ms). Remaining tasks: {Count}",
                                     _frameStopwatch.Elapsed.TotalMilliseconds, _taskQueue.Count);
                     break;
                 }
 
-                if (!_taskQueue.TryDequeue(out var taskItem)) continue;
+                if (!_taskQueue.TryDequeue(out var taskItem))
+                    break;
 
                 try
                 {
@@ -130,9 +163,14 @@ namespace Client.Main.Controllers
                 }
             }
 
-            if (_taskQueue.Count > 50) // Warn about buildup
+            int remaining = _taskQueue.Count;
+            _lastFrameProcessedTasks = processedThisFrame;
+            _lastFrameQueueAtStart = queuedAtStart;
+            _lastFrameQueueRemaining = remaining;
+            _lastFrameProcessingMs = _frameStopwatch.Elapsed.TotalMilliseconds;
+            if (remaining > 50) // Warn about buildup
             {
-                _logger.LogWarning("Task queue is backing up. Current count: {Count}", _taskQueue.Count);
+                _logger.LogWarning("Task queue is backing up. Current count: {Count}", remaining);
             }
         }
 
@@ -140,6 +178,11 @@ namespace Client.Main.Controllers
         /// Gets the number of currently queued tasks
         /// </summary>
         public int QueuedTaskCount => _taskQueue.Count;
+        public int LastFrameProcessedTasks => _lastFrameProcessedTasks;
+        public int LastFrameQueueAtStart => _lastFrameQueueAtStart;
+        public int LastFrameQueueRemaining => _lastFrameQueueRemaining;
+        public double LastFrameProcessingMs => _lastFrameProcessingMs;
+        public long TotalProcessedTasks => Interlocked.Read(ref _processedTasks);
 
         /// <summary>
         /// Gets statistics about task processing
@@ -169,25 +212,48 @@ namespace Client.Main.Controllers
             ClearQueue();
         }
 
+        private async Task ObserveTaskAsync(Task task, Priority priority)
+        {
+            try
+            {
+                await task.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error executing async scheduled task - Priority: {Priority}", priority);
+            }
+        }
+
         // Simple concurrent priority queue implementation
         private class ConcurrentPriorityQueue<T> where T : TaskItem
         {
             private readonly object _lock = new();
-            private readonly Dictionary<Priority, ConcurrentQueue<T>> _queues = new()
-            {
-                { Priority.Critical, new ConcurrentQueue<T>() },
-                { Priority.High,     new ConcurrentQueue<T>() },
-                { Priority.Normal,   new ConcurrentQueue<T>() },
-                { Priority.Low,      new ConcurrentQueue<T>() },
-            };
-
-            private volatile int _count;
+            private readonly Queue<T> _criticalQueue = new();
+            private readonly Queue<T> _highQueue = new();
+            private readonly Queue<T> _normalQueue = new();
+            private readonly Queue<T> _lowQueue = new();
+            private int _count;
 
             public void Enqueue(T item)
             {
                 lock (_lock)
                 {
-                    _queues[item.TaskPriority].Enqueue(item);
+                    switch (item.TaskPriority)
+                    {
+                        case Priority.Critical:
+                            _criticalQueue.Enqueue(item);
+                            break;
+                        case Priority.High:
+                            _highQueue.Enqueue(item);
+                            break;
+                        case Priority.Normal:
+                            _normalQueue.Enqueue(item);
+                            break;
+                        default:
+                            _lowQueue.Enqueue(item);
+                            break;
+                    }
+
                     _count++;
                 }
             }
@@ -204,11 +270,30 @@ namespace Client.Main.Controllers
                     }
 
                     // Check queues by priority order
-                    if (_queues[Priority.Critical].TryDequeue(out item) ||
-                        _queues[Priority.High].TryDequeue(out item) ||
-                        _queues[Priority.Normal].TryDequeue(out item) ||
-                        _queues[Priority.Low].TryDequeue(out item))
+                    if (_criticalQueue.Count > 0)
                     {
+                        item = _criticalQueue.Dequeue();
+                        _count--;
+                        return true;
+                    }
+
+                    if (_highQueue.Count > 0)
+                    {
+                        item = _highQueue.Dequeue();
+                        _count--;
+                        return true;
+                    }
+
+                    if (_normalQueue.Count > 0)
+                    {
+                        item = _normalQueue.Dequeue();
+                        _count--;
+                        return true;
+                    }
+
+                    if (_lowQueue.Count > 0)
+                    {
+                        item = _lowQueue.Dequeue();
                         _count--;
                         return true;
                     }
@@ -222,24 +307,15 @@ namespace Client.Main.Controllers
             {
                 lock (_lock)
                 {
-                    foreach (var q in _queues.Values)
-                    {
-                        while (q.TryDequeue(out _)) { }
-                    }
+                    _criticalQueue.Clear();
+                    _highQueue.Clear();
+                    _normalQueue.Clear();
+                    _lowQueue.Clear();
                     _count = 0;
                 }
             }
 
-            public int Count
-            {
-                get
-                {
-                    lock (_lock)
-                    {
-                        return _count;
-                    }
-                }
-            }
+            public int Count => Volatile.Read(ref _count);
         }
     }
 }

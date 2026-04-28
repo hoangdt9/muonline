@@ -9,6 +9,8 @@ namespace Client.Main.Objects.Worlds.Lorencia
 {
     public class HouseObject : ModelObject
     {
+        // These walls rely on the regular per-mesh path to preserve partially transparent sections.
+        protected override bool AllowMapObjectInstancing => false;
         private float _alpha = 0.6f;
         private float _alphaTarget = 1f;
 

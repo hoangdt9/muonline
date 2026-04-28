@@ -271,6 +271,13 @@ namespace Client.Main.Objects
             if (IsDead || !Visible)
                 return;
 
+            // Show monster labels only when hovered or when HP bar is available.
+            // This matches expected clutter reduction while still keeping combat readability.
+            bool showByHover = Constants.SHOW_NAMES_ON_HOVER && IsMouseHover;
+            bool showByHealth = _hasHealthFraction;
+            if (!showByHover && !showByHealth)
+                return;
+
             var font = GraphicsManager.Instance.Font;
             if (font == null)
                 return;
@@ -283,17 +290,7 @@ namespace Client.Main.Objects
                 return;
 
             float? hp = _hasHealthFraction ? _healthFraction : null;
-
-            var sb = GraphicsManager.Instance.Sprite;
-            using (new SpriteBatchScope(
-                       sb,
-                       SpriteSortMode.Deferred,
-                       BlendState.NonPremultiplied,
-                       SamplerState.LinearClamp,
-                       DepthStencilState.None))
-            {
-                OverheadNameplateRenderer.DrawNameplate(sb, font, screen, name, hp, Constants.RENDER_SCALE);
-            }
+            OverheadNameplateRenderer.EnqueueNameplate(font, screen, name, hp, Constants.RENDER_SCALE);
         }
 
         /// <summary>

@@ -64,6 +64,7 @@ namespace Client.Main
         public static bool MSAA_ENABLED;
         public static bool ENABLE_DYNAMIC_LIGHTS;
         public static bool ENABLE_DYNAMIC_LIGHTING_SHADER;
+        public static bool ENABLE_GPU_SKINNING;
         public static bool ENABLE_TERRAIN_GPU_LIGHTING;
         public static bool OPTIMIZE_FOR_INTEGRATED_GPU;
         public static bool DEBUG_LIGHTING_AREAS;
@@ -71,6 +72,7 @@ namespace Client.Main
         public static bool ENABLE_MONSTER_MATERIAL_SHADER;
         public static bool ENABLE_WEAPON_TRAIL;
         public static bool ENABLE_BATCH_OPTIMIZED_SORTING;
+        public static bool ENABLE_MAP_OBJECT_INSTANCING;
         public static bool ENABLE_STATIC_CHUNK_CACHING;
         public static bool ENABLE_ITEM_MATERIAL_ANIMATION;
         public static bool ENABLE_DYNAMIC_BUFFER_POOL;
@@ -89,6 +91,12 @@ namespace Client.Main
         public static int SHADOW_MAP_SIZE;
         public static float SHADOW_DISTANCE;
         public static int DYNAMIC_LIGHT_UPDATE_FPS;
+        public static int ANIMATION_UPDATE_FPS;
+
+        public const int MIN_PERFORMANCE_FPS_CAP = 10;
+        public const int MAX_PERFORMANCE_FPS_CAP = 120;
+        public const int DEFAULT_DYNAMIC_LIGHT_UPDATE_FPS = 23;
+        public const int DEFAULT_ANIMATION_UPDATE_FPS = 45;
 
         // Day-Night Cycle (real-time sun movement)
         public static bool ENABLE_DAY_NIGHT_CYCLE;
@@ -172,6 +180,11 @@ namespace Client.Main
             return ShadowQuality.Ultra;
         }
 
+        public static int ClampPerformanceFps(int fps)
+        {
+            return Math.Clamp(fps, MIN_PERFORMANCE_FPS_CAP, MAX_PERFORMANCE_FPS_CAP);
+        }
+
         // Paths
         public static string DataPath;
         public static string DataPathUrl = "http://192.168.55.220/Data.zip";
@@ -211,6 +224,7 @@ namespace Client.Main
             MSAA_ENABLED = false;
             ENABLE_DYNAMIC_LIGHTS = true;
             ENABLE_DYNAMIC_LIGHTING_SHADER = true;
+            ENABLE_GPU_SKINNING = false;
             ENABLE_TERRAIN_GPU_LIGHTING = true;
             OPTIMIZE_FOR_INTEGRATED_GPU = false;
             DEBUG_LIGHTING_AREAS = false;
@@ -218,6 +232,7 @@ namespace Client.Main
             ENABLE_MONSTER_MATERIAL_SHADER = true;
             ENABLE_WEAPON_TRAIL = true;
             ENABLE_BATCH_OPTIMIZED_SORTING = true;
+            ENABLE_MAP_OBJECT_INSTANCING = true;
             ENABLE_STATIC_CHUNK_CACHING = true;
             ENABLE_ITEM_MATERIAL_ANIMATION = false;
             ENABLE_DYNAMIC_BUFFER_POOL = true;
@@ -228,7 +243,8 @@ namespace Client.Main
             ENABLE_SHADOW_MAPPING = false;
             ENABLE_DAY_NIGHT_CYCLE = false;
             DAY_NIGHT_SPEED_MULTIPLIER = 60f;
-            DYNAMIC_LIGHT_UPDATE_FPS = 30;
+            DYNAMIC_LIGHT_UPDATE_FPS = DEFAULT_DYNAMIC_LIGHT_UPDATE_FPS;
+            ANIMATION_UPDATE_FPS = DEFAULT_ANIMATION_UPDATE_FPS;
             // Default to the Medium preset unless user changes it in options
             // ApplyShadowQualityPreset(ShadowQuality.Medium);
             SHADOW_NEAR_PLANE = 10f;

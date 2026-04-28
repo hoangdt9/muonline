@@ -56,12 +56,14 @@ namespace Client.Main.Objects.Effects
         private float _lifeFrames = CoreLifeFrames;
         private float _time;
         private readonly DynamicLight _coreLight;
+        private TerrainControl? _lightTerrain;
         private bool _lightsAdded;
 
         public ScrollOfInfernoEffect(WalkerObject caster, Vector3 center)
         {
             _caster = caster ?? throw new ArgumentNullException(nameof(caster));
             _center = center;
+            Position = center;
 
             IsTransparent = true;
             AffectedByTransparency = true;
@@ -100,7 +102,8 @@ namespace Client.Main.Objects.Effects
 
             if (World?.Terrain != null && !_lightsAdded)
             {
-                World.Terrain.AddDynamicLight(_coreLight);
+                _lightTerrain = World.Terrain;
+                _lightTerrain.AddDynamicLight(_coreLight);
                 _lightsAdded = true;
             }
         }
@@ -117,6 +120,7 @@ namespace Client.Main.Objects.Effects
 
             if (_caster.Status == GameControlStatus.Disposed || _caster.World == null)
             {
+                DetachDynamicLight();
                 RemoveSelf();
                 return;
             }
@@ -134,6 +138,7 @@ namespace Client.Main.Objects.Effects
             _lifeFrames -= factor;
             if (_lifeFrames <= 0f)
             {
+                DetachDynamicLight();
                 RemoveSelf();
                 return;
             }
@@ -309,7 +314,8 @@ namespace Client.Main.Objects.Effects
         {
             if (!_lightsAdded && World?.Terrain != null)
             {
-                World.Terrain.AddDynamicLight(_coreLight);
+                _lightTerrain = World.Terrain;
+                _lightTerrain.AddDynamicLight(_coreLight);
                 _lightsAdded = true;
             }
 
@@ -445,6 +451,8 @@ namespace Client.Main.Objects.Effects
 
         private void RemoveSelf()
         {
+            DetachDynamicLight();
+
             if (Parent != null)
                 Parent.Children.Remove(this);
             else
@@ -468,13 +476,21 @@ namespace Client.Main.Objects.Effects
 
         public override void Dispose()
         {
-            if (_lightsAdded && World?.Terrain != null)
-            {
-                World.Terrain.RemoveDynamicLight(_coreLight);
-                _lightsAdded = false;
-            }
+            DetachDynamicLight();
 
             base.Dispose();
+        }
+
+        private void DetachDynamicLight()
+        {
+            if (!_lightsAdded)
+                return;
+
+            TerrainControl? terrain = _lightTerrain ?? World?.Terrain;
+            terrain?.RemoveDynamicLight(_coreLight);
+            terrain?.RemoveDynamicLightsByOwner(this);
+            _lightsAdded = false;
+            _lightTerrain = null;
         }
 
         private struct Burst

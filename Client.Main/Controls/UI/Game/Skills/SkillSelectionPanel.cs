@@ -4,24 +4,36 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Client.Data.BMD;
+using Client.Main.Controls.UI;
+using Client.Main.Controls.UI.Common;
+using Client.Main.Controls.UI.Game.Common;
+using Client.Main.Controllers;
 using Client.Main.Core.Client;
 using Client.Main.Core.Utilities;
 using Client.Main.Models;
 using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using Microsoft.Xna.Framework.Input;
 
 namespace Client.Main.Controls.UI.Game.Skills
 {
     /// <summary>
-    /// Popup panel displaying all available skills in a grid layout.
-    /// Allows player to select a skill for the quick slot.
+    /// Popup panel displaying all available skills in a modern grid + detail layout.
     /// </summary>
-    public class SkillSelectionPanel : UIControl
+    public class SkillSelectionPanel : UIControl, IUiTexturePreloadable
     {
-        private const int COLUMNS = 5;
-        private const int PADDING = 8;
-        private const int HEADER_HEIGHT = 36;
-        private const int DETAIL_WIDTH = 220;
-        private const int DETAIL_PADDING = 12;
+        private const int COLUMNS = 6;
+        private const int OUTER_PADDING = 14;
+        private const int HEADER_HEIGHT = 52;
+        private const int CONTENT_GAP = 12;
+        private const int GRID_PADDING = 12;
+        private const int SLOT_GAP = 10;
+        private const int DETAIL_WIDTH = 320;
+        private const int DETAIL_PADDING = 14;
+        private const int MIN_DETAIL_HEIGHT = 300;
+        private const float TARGET_SLOT_SCALE = 1.24f;
+        private const float OPEN_ANIMATION_DURATION = 0.18f;
+        private const int OPEN_ANIMATION_OFFSET_Y = 18;
 
         private readonly List<SkillSlotControl> _skillSlots = new();
         private readonly LabelControl _titleLabel;
@@ -29,7 +41,15 @@ namespace Client.Main.Controls.UI.Game.Skills
         private readonly LabelControl _detailNameLabel;
         private readonly LabelControl _detailTypeLabel;
         private readonly LabelControl _detailStatsLabel;
+
+        private Rectangle _headerRectLocal;
+        private Rectangle _contentRectLocal;
+        private Rectangle _gridRectLocal;
+        private Rectangle _detailRectLocal;
         private ushort? _selectedSkillId;
+        private float _slotScale = TARGET_SLOT_SCALE;
+        private bool _isOpeningAnimation;
+        private float _openAnimationElapsedSeconds;
 
         private sealed class PanelControl : UIControl { }
 
@@ -41,22 +61,20 @@ namespace Client.Main.Controls.UI.Game.Skills
         public SkillSelectionPanel()
         {
             Interactive = true;
-            BackgroundColor = new Color(20, 20, 30) * 0.95f;
-            BorderColor = Color.Gold;
-            BorderThickness = 2;
+            BackgroundColor = Color.Transparent;
+            BorderColor = Color.Transparent;
+            BorderThickness = 0;
             Visible = false;
-
-            // Center on screen
             Align = ControlAlign.HorizontalCenter | ControlAlign.VerticalCenter;
 
-            // Title
             _titleLabel = new LabelControl
             {
                 Text = "Select Skill",
-                TextColor = Color.Gold,
-                X = PADDING,
-                Y = PADDING,
-                ViewSize = new Point(320, 22),
+                TextColor = ModernHudTheme.TextGold,
+                FontSize = 15f,
+                X = OUTER_PADDING,
+                Y = 14,
+                ViewSize = new Point(460, 26),
                 Align = ControlAlign.HorizontalCenter
             };
             Controls.Add(_titleLabel);
@@ -64,11 +82,11 @@ namespace Client.Main.Controls.UI.Game.Skills
             _detailPanel = new PanelControl
             {
                 AutoViewSize = false,
-                ControlSize = new Point(DETAIL_WIDTH, 220),
-                ViewSize = new Point(DETAIL_WIDTH, 220),
-                BackgroundColor = new Color(12, 16, 28) * 0.95f,
-                BorderColor = new Color(70, 70, 110),
-                BorderThickness = 1,
+                ControlSize = new Point(DETAIL_WIDTH, MIN_DETAIL_HEIGHT),
+                ViewSize = new Point(DETAIL_WIDTH, MIN_DETAIL_HEIGHT),
+                BackgroundColor = Color.Transparent,
+                BorderColor = Color.Transparent,
+                BorderThickness = 0,
                 Interactive = false
             };
             Controls.Add(_detailPanel);
@@ -76,35 +94,38 @@ namespace Client.Main.Controls.UI.Game.Skills
             _detailNameLabel = new LabelControl
             {
                 Text = "Skill Info",
-                TextColor = Color.White,
-                FontSize = 14f,
+                TextColor = ModernHudTheme.TextGold,
+                FontSize = 15f,
                 X = DETAIL_PADDING,
                 Y = DETAIL_PADDING,
-                ViewSize = new Point(DETAIL_WIDTH - DETAIL_PADDING * 2, 24)
+                ViewSize = new Point(DETAIL_WIDTH - DETAIL_PADDING * 2, 28)
             };
             _detailPanel.Controls.Add(_detailNameLabel);
 
             _detailTypeLabel = new LabelControl
             {
                 Text = string.Empty,
-                TextColor = Color.Gold,
+                TextColor = ModernHudTheme.SecondaryBright,
                 FontSize = 12f,
                 X = DETAIL_PADDING,
-                Y = DETAIL_PADDING + 24,
-                ViewSize = new Point(DETAIL_WIDTH - DETAIL_PADDING * 2, 20)
+                Y = DETAIL_PADDING + 28,
+                ViewSize = new Point(DETAIL_WIDTH - DETAIL_PADDING * 2, 22)
             };
             _detailPanel.Controls.Add(_detailTypeLabel);
 
             _detailStatsLabel = new LabelControl
             {
                 Text = "Hover a skill to see details.",
-                TextColor = Color.Silver,
+                TextColor = ModernHudTheme.TextGray,
                 X = DETAIL_PADDING,
-                Y = DETAIL_PADDING + 46,
-                ViewSize = new Point(DETAIL_WIDTH - DETAIL_PADDING * 2, 150),
-                Scale = 0.85f
+                Y = DETAIL_PADDING + 54,
+                ViewSize = new Point(DETAIL_WIDTH - DETAIL_PADDING * 2, 200),
+                Scale = 0.9f
             };
             _detailPanel.Controls.Add(_detailStatsLabel);
+
+            Alpha = 1f;
+            Offset = Point.Zero;
         }
 
         /// <summary>
@@ -113,7 +134,9 @@ namespace Client.Main.Controls.UI.Game.Skills
         public void Open(CharacterState characterState)
         {
             if (characterState == null)
+            {
                 return;
+            }
 
             var skills = characterState
                 .GetSkills()
@@ -121,10 +144,8 @@ namespace Client.Main.Controls.UI.Game.Skills
                 .ThenBy(s => s.SkillId)
                 .ToList();
 
-            // Update title with skill count
             _titleLabel.Text = $"Select Skill ({skills.Count} available)";
 
-            // Clear existing skill slots
             foreach (var slot in _skillSlots)
             {
                 slot.HoverChanged -= OnSkillSlotHover;
@@ -132,23 +153,42 @@ namespace Client.Main.Controls.UI.Game.Skills
             }
             _skillSlots.Clear();
 
-            // Calculate panel size
             int rows = (int)Math.Ceiling(skills.Count / (float)COLUMNS);
-            if (rows == 0) rows = 1; // At least one row even if no skills
+            if (rows == 0)
+            {
+                rows = 1;
+            }
 
-            int gridWidth = (COLUMNS * SkillSlotControl.SLOT_WIDTH) + ((COLUMNS + 1) * PADDING);
-            int gridHeight = HEADER_HEIGHT + PADDING + (rows * (SkillSlotControl.SLOT_HEIGHT + PADDING)) + PADDING;
+            _slotScale = CalculateSlotScale(rows);
 
-            int totalWidth = gridWidth + DETAIL_WIDTH + (PADDING * 3);
-            int totalHeight = gridHeight + PADDING;
+            int slotWidth = Math.Max(1, (int)MathF.Round(SkillSlotControl.SLOT_WIDTH * _slotScale));
+            int slotHeight = Math.Max(1, (int)MathF.Round(SkillSlotControl.SLOT_HEIGHT * _slotScale));
+
+            int gridSlotsWidth = (COLUMNS * slotWidth) + ((COLUMNS - 1) * SLOT_GAP);
+            int gridSlotsHeight = (rows * slotHeight) + ((rows - 1) * SLOT_GAP);
+
+            int gridPanelWidth = gridSlotsWidth + (GRID_PADDING * 2);
+            int gridPanelHeight = Math.Max(gridSlotsHeight + (GRID_PADDING * 2), MIN_DETAIL_HEIGHT);
+            int contentHeight = Math.Max(gridPanelHeight, MIN_DETAIL_HEIGHT);
+            int contentWidth = gridPanelWidth + CONTENT_GAP + DETAIL_WIDTH;
+
+            int totalWidth = contentWidth + (OUTER_PADDING * 2);
+            int totalHeight = HEADER_HEIGHT + contentHeight + OUTER_PADDING;
 
             ViewSize = new Point(totalWidth, totalHeight);
             ControlSize = ViewSize;
 
-            _titleLabel.ViewSize = new Point(totalWidth - (PADDING * 2), 24);
-            _titleLabel.X = PADDING;
+            _headerRectLocal = new Rectangle(0, 0, totalWidth, HEADER_HEIGHT);
+            _contentRectLocal = new Rectangle(OUTER_PADDING, HEADER_HEIGHT, contentWidth, contentHeight);
+            _gridRectLocal = new Rectangle(_contentRectLocal.X, _contentRectLocal.Y, gridPanelWidth, contentHeight);
+            _detailRectLocal = new Rectangle(_gridRectLocal.Right + CONTENT_GAP, _contentRectLocal.Y, DETAIL_WIDTH, contentHeight);
 
-            // Create skill slots in grid
+            _titleLabel.ViewSize = new Point(totalWidth - (OUTER_PADDING * 2), 28);
+            _titleLabel.X = OUTER_PADDING;
+
+            int slotsStartX = _gridRectLocal.X + GRID_PADDING;
+            int slotsStartY = _gridRectLocal.Y + GRID_PADDING;
+
             for (int i = 0; i < skills.Count; i++)
             {
                 int row = i / COLUMNS;
@@ -157,9 +197,11 @@ namespace Client.Main.Controls.UI.Game.Skills
                 var slot = new SkillSlotControl
                 {
                     Skill = skills[i],
-                    X = PADDING + (col * (SkillSlotControl.SLOT_WIDTH + PADDING)),
-                    Y = HEADER_HEIGHT + PADDING + (row * (SkillSlotControl.SLOT_HEIGHT + PADDING)),
-                    IsTooltipEnabled = false
+                    X = slotsStartX + (col * (slotWidth + SLOT_GAP)),
+                    Y = slotsStartY + (row * (slotHeight + SLOT_GAP)),
+                    Scale = _slotScale,
+                    IsTooltipEnabled = false,
+                    ShowFooter = false
                 };
 
                 slot.Click += (sender, args) => OnSkillSlotClicked(slot);
@@ -169,27 +211,27 @@ namespace Client.Main.Controls.UI.Game.Skills
                 Controls.Add(slot);
             }
 
-            // Position detail panel
-            int detailHeight = Math.Max(gridHeight - HEADER_HEIGHT - (PADDING * 2), 160);
-            _detailPanel.X = gridWidth + (PADDING * 2);
-            _detailPanel.Y = HEADER_HEIGHT;
-            _detailPanel.ControlSize = new Point(DETAIL_WIDTH, detailHeight);
+            _detailPanel.X = _detailRectLocal.X;
+            _detailPanel.Y = _detailRectLocal.Y;
+            _detailPanel.ControlSize = new Point(_detailRectLocal.Width, _detailRectLocal.Height);
             _detailPanel.ViewSize = _detailPanel.ControlSize;
 
-            int statsHeight = Math.Max(detailHeight - (DETAIL_PADDING + 46), 40);
-            _detailStatsLabel.ViewSize = new Point(DETAIL_WIDTH - DETAIL_PADDING * 2, statsHeight);
+            _detailNameLabel.ViewSize = new Point(_detailRectLocal.Width - DETAIL_PADDING * 2, 28);
+            _detailTypeLabel.ViewSize = new Point(_detailRectLocal.Width - DETAIL_PADDING * 2, 22);
+
+            int statsHeight = Math.Max(_detailRectLocal.Height - (DETAIL_PADDING + 54), 60);
+            _detailStatsLabel.ViewSize = new Point(_detailRectLocal.Width - DETAIL_PADDING * 2, statsHeight);
 
             if (_selectedSkillId.HasValue)
             {
                 HighlightSkill(_selectedSkillId.Value);
             }
-            else
-            {
-                UpdateDetail(skills.FirstOrDefault());
-            }
+
+            UpdateDetail(null);
 
             Visible = true;
             BringToFront();
+            StartOpenAnimation();
         }
 
         /// <summary>
@@ -197,13 +239,219 @@ namespace Client.Main.Controls.UI.Game.Skills
         /// </summary>
         public void Close()
         {
+            _isOpeningAnimation = false;
+            _openAnimationElapsedSeconds = 0f;
+            Alpha = 1f;
+            Offset = Point.Zero;
+            ApplyAlphaToChildren(1f);
             Visible = false;
+        }
+
+        public override void Draw(GameTime gameTime)
+        {
+            if (Status != GameControlStatus.Ready || !Visible)
+            {
+                return;
+            }
+
+            var spriteBatch = GraphicsManager.Instance.Sprite;
+            var pixel = GraphicsManager.Instance.Pixel;
+            if (spriteBatch == null || pixel == null)
+            {
+                return;
+            }
+
+            DrawWindowFrame(spriteBatch, pixel, Alpha);
+
+            for (int i = 0; i < Controls.Count; i++)
+            {
+                Controls[i].Draw(gameTime);
+            }
+        }
+
+        public override void Update(GameTime gameTime)
+        {
+            base.Update(gameTime);
+
+            if (!Visible)
+            {
+                return;
+            }
+
+            UpdateOpenAnimation(gameTime);
+            HandleOutsideClickClose();
+        }
+
+        private void DrawWindowFrame(SpriteBatch spriteBatch, Texture2D pixel, float alpha)
+        {
+            Rectangle rect = DisplayRectangle;
+            spriteBatch.Draw(pixel, rect, ModernHudTheme.BorderOuter * alpha);
+
+            Rectangle inner = new(rect.X + 1, rect.Y + 1, Math.Max(1, rect.Width - 2), Math.Max(1, rect.Height - 2));
+            UiDrawHelper.DrawVerticalGradient(spriteBatch, inner, new Color(20, 24, 32, 252) * alpha, new Color(10, 12, 16, 255) * alpha);
+            UiDrawHelper.DrawCornerAccents(spriteBatch, rect, ModernHudTheme.Accent * 0.35f * alpha, size: 8, thickness: 1);
+
+            Rectangle headerRect = ToDisplayRect(_headerRectLocal);
+            UiDrawHelper.DrawPanel(
+                spriteBatch,
+                headerRect,
+                ModernHudTheme.BgMid * alpha,
+                ModernHudTheme.BorderInner * alpha,
+                ModernHudTheme.BorderOuter * alpha,
+                ModernHudTheme.BorderHighlight * 0.3f * alpha);
+
+            var headerInner = new Rectangle(
+                headerRect.X + 1,
+                headerRect.Y + 1,
+                Math.Max(1, headerRect.Width - 2),
+                Math.Max(1, headerRect.Height - 2));
+            UiDrawHelper.DrawVerticalGradient(spriteBatch, headerInner, ModernHudTheme.BgLight * alpha, ModernHudTheme.BgMid * alpha);
+
+            spriteBatch.Draw(
+                pixel,
+                new Rectangle(headerInner.X + 10, headerInner.Bottom - 2, Math.Max(1, headerInner.Width - 20), 1),
+                ModernHudTheme.Accent * 0.6f * alpha);
+
+            Rectangle gridRect = ToDisplayRect(_gridRectLocal);
+            DrawSectionPanel(spriteBatch, gridRect, ModernHudTheme.BgMid * alpha, ModernHudTheme.BgDarkest * alpha, alpha);
+
+            Rectangle detailRect = ToDisplayRect(_detailRectLocal);
+            DrawSectionPanel(spriteBatch, detailRect, new Color(20, 26, 36, 250) * alpha, new Color(9, 12, 17, 255) * alpha, alpha);
+
+            spriteBatch.Draw(
+                pixel,
+                new Rectangle(detailRect.X + 1, detailRect.Y + 44, Math.Max(1, detailRect.Width - 2), 1),
+                ModernHudTheme.BorderInner * 0.35f * alpha);
+        }
+
+        private static void DrawSectionPanel(SpriteBatch spriteBatch, Rectangle rect, Color topColor, Color bottomColor, float alpha)
+        {
+            UiDrawHelper.DrawPanel(
+                spriteBatch,
+                rect,
+                topColor,
+                ModernHudTheme.BorderInner * 0.7f * alpha,
+                ModernHudTheme.BorderOuter * alpha,
+                ModernHudTheme.BorderHighlight * 0.2f * alpha);
+
+            var inner = new Rectangle(
+                rect.X + 1,
+                rect.Y + 1,
+                Math.Max(1, rect.Width - 2),
+                Math.Max(1, rect.Height - 2));
+
+            UiDrawHelper.DrawVerticalGradient(spriteBatch, inner, topColor, bottomColor);
+        }
+
+        private void StartOpenAnimation()
+        {
+            _isOpeningAnimation = true;
+            _openAnimationElapsedSeconds = 0f;
+            Alpha = 0f;
+            Offset = new Point(0, OPEN_ANIMATION_OFFSET_Y);
+            ApplyAlphaToChildren(Alpha);
+        }
+
+        private void UpdateOpenAnimation(GameTime gameTime)
+        {
+            if (!_isOpeningAnimation)
+            {
+                return;
+            }
+
+            _openAnimationElapsedSeconds += (float)gameTime.ElapsedGameTime.TotalSeconds;
+            float t = MathHelper.Clamp(_openAnimationElapsedSeconds / OPEN_ANIMATION_DURATION, 0f, 1f);
+            float eased = 1f - MathF.Pow(1f - t, 3f);
+
+            Alpha = eased;
+            Offset = new Point(0, (int)MathF.Round((1f - eased) * OPEN_ANIMATION_OFFSET_Y));
+            ApplyAlphaToChildren(eased);
+
+            if (t >= 1f)
+            {
+                _isOpeningAnimation = false;
+                Alpha = 1f;
+                Offset = Point.Zero;
+                ApplyAlphaToChildren(1f);
+            }
+        }
+
+        private void HandleOutsideClickClose()
+        {
+            bool leftJustPressed =
+                CurrentMouseState.LeftButton == ButtonState.Pressed &&
+                PreviousMouseState.LeftButton == ButtonState.Released;
+
+            if (!leftJustPressed)
+            {
+                return;
+            }
+
+            Point mousePos = CurrentMouseState.Position;
+            if (DisplayRectangle.Contains(mousePos))
+            {
+                return;
+            }
+
+            Close();
+            Scene?.SetMouseInputConsumed();
+        }
+
+        private void ApplyAlphaToChildren(float alpha)
+        {
+            for (int i = 0; i < Controls.Count; i++)
+            {
+                ApplyAlphaRecursive(Controls[i], alpha);
+            }
+        }
+
+        private static void ApplyAlphaRecursive(GameControl control, float alpha)
+        {
+            control.Alpha = alpha;
+            if (control is LabelControl label)
+            {
+                label.Alpha = alpha;
+            }
+
+            for (int i = 0; i < control.Controls.Count; i++)
+            {
+                ApplyAlphaRecursive(control.Controls[i], alpha);
+            }
+        }
+
+        private Rectangle ToDisplayRect(Rectangle localRect)
+        {
+            Point p = DisplayPosition;
+            return new Rectangle(p.X + localRect.X, p.Y + localRect.Y, localRect.Width, localRect.Height);
+        }
+
+        private static float CalculateSlotScale(int rows)
+        {
+            float scale = TARGET_SLOT_SCALE;
+            int availableHeight = Math.Max(300, UiScaler.VirtualSize.Y - 220);
+
+            while (scale > 1.0f)
+            {
+                int slotHeight = Math.Max(1, (int)MathF.Round(SkillSlotControl.SLOT_HEIGHT * scale));
+                int gridSlotsHeight = (rows * slotHeight) + ((rows - 1) * SLOT_GAP);
+                int panelHeight = gridSlotsHeight + (GRID_PADDING * 2);
+                if (panelHeight <= availableHeight)
+                {
+                    break;
+                }
+
+                scale -= 0.05f;
+            }
+
+            return Math.Max(1.0f, scale);
         }
 
         private void OnSkillSlotClicked(SkillSlotControl slot)
         {
             if (slot.Skill == null)
+            {
                 return;
+            }
 
             _selectedSkillId = slot.Skill.SkillId;
             SkillSelected?.Invoke(slot.Skill);
@@ -225,25 +473,11 @@ namespace Client.Main.Controls.UI.Game.Skills
                 }
             }
 
-            UpdateDetail(selected);
         }
 
         private void OnSkillSlotHover(SkillEntryState? skill)
         {
-            if (!_selectedSkillId.HasValue)
-            {
-                UpdateDetail(skill);
-                return;
-            }
-
-            if (skill != null)
-            {
-                UpdateDetail(skill);
-                return;
-            }
-
-            var selectedSlot = _skillSlots.FirstOrDefault(s => s.Skill?.SkillId == _selectedSkillId);
-            UpdateDetail(selectedSlot?.Skill);
+            UpdateDetail(skill);
         }
 
         private void UpdateDetail(SkillEntryState? skill)
@@ -253,7 +487,7 @@ namespace Client.Main.Controls.UI.Game.Skills
                 _detailNameLabel.Text = "Skill Info";
                 _detailTypeLabel.Text = string.Empty;
                 _detailStatsLabel.Text = "Hover a skill to see details.";
-                _detailStatsLabel.TextColor = Color.Silver;
+                _detailStatsLabel.TextColor = ModernHudTheme.TextGray;
                 return;
             }
 
@@ -268,7 +502,7 @@ namespace Client.Main.Controls.UI.Game.Skills
             };
 
             _detailNameLabel.Text = SkillDatabase.GetSkillName(skill.SkillId);
-            _detailTypeLabel.Text = $"Type: {typeText}  •  Level {skill.SkillLevel}";
+            _detailTypeLabel.Text = $"Type: {typeText}  |  Level {skill.SkillLevel}";
 
             var sb = new StringBuilder();
             sb.AppendLine($"Skill ID: {skill.SkillId}");
@@ -334,18 +568,9 @@ namespace Client.Main.Controls.UI.Game.Skills
             }
 
             _detailStatsLabel.Text = sb.ToString();
-            _detailStatsLabel.TextColor = Color.WhiteSmoke;
+            _detailStatsLabel.TextColor = ModernHudTheme.TextWhite;
         }
 
-        public override void Update(GameTime gameTime)
-        {
-            base.Update(gameTime);
-
-            // Close on click outside (optional - can be enabled if desired)
-            // if (Visible && !IsMouseOver && CurrentMouseState.LeftButton == ButtonState.Pressed)
-            // {
-            //     Close();
-            // }
-        }
+        public IEnumerable<string> GetPreloadTexturePaths() => SkillIconAtlas.TexturePaths;
     }
 }

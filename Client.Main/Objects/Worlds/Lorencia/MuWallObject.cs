@@ -11,6 +11,9 @@ namespace Client.Main.Objects.Worlds.Lorencia
 {
     public class MuWallObject : ModelObject
     {
+        // These walls rely on the regular per-mesh path to preserve partially transparent sections.
+        protected override bool AllowMapObjectInstancing => false;
+
         public MuWallObject()
         {
             LightEnabled = true;
