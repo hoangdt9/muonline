@@ -42,15 +42,6 @@ namespace Client.Main.Controls.Terrain
         private readonly int[] _tileIndexCounts = new int[256];
         private readonly ushort[][] _tileAlphaIndexBatches = new ushort[256][];
         private readonly int[] _tileAlphaIndexCounts = new int[256];
-        private readonly bool[] _tileIndexActive = new bool[256];
-        private readonly bool[] _tileAlphaIndexActive = new bool[256];
-        private readonly List<int> _activeTileIndexTextures = new(32);
-        private readonly List<int> _activeTileAlphaIndexTextures = new(32);
-
-        private readonly bool[] _tileBatchActive = new bool[256];
-        private readonly bool[] _tileAlphaBatchActive = new bool[256];
-        private readonly List<int> _activeTileBatchTextures = new(32);
-        private readonly List<int> _activeTileAlphaBatchTextures = new(32);
 
         // Buffers for a single terrain tile quad
         private readonly TerrainVertexPositionColorNormalTexture[] _terrainVertices = new TerrainVertexPositionColorNormalTexture[6];
@@ -91,8 +82,15 @@ namespace Client.Main.Controls.Terrain
         private float _terrainBuffersAmbientLight = float.NaN;
         private byte[] _terrainBuffersAlphaMapRef;
 
-        private const int DynamicLightArrayCapacity = 32;
-        private readonly DynamicLightGpuUploader _dynamicLightUploader = new(DynamicLightArrayCapacity);
+        private const int DynamicLightArrayCapacity = 32; // Must match DynamicLighting.fx MAX_LIGHTS.
+        private readonly Vector3[] _cachedLightPositions = new Vector3[DynamicLightArrayCapacity];
+        private readonly Vector3[] _cachedLightColors = new Vector3[DynamicLightArrayCapacity];
+        private readonly float[] _cachedLightRadii = new float[DynamicLightArrayCapacity];
+        private readonly float[] _cachedLightIntensities = new float[DynamicLightArrayCapacity];
+        private readonly float[] _cachedLightScores = new float[DynamicLightArrayCapacity];
+        private int _lastLightsVersion = -1;
+        private int _lastLightCount = 0;
+        private const float MinLightInfluence = 0.001f;
 
         private Vector2 _waterFlowDir = Vector2.UnitX;
         private float _waterTotal = 0f;
@@ -115,7 +113,6 @@ namespace Client.Main.Controls.Terrain
         public int DrawnTriangles { get; private set; }
         public int DrawnBlocks { get; private set; }
         public int DrawnCells { get; private set; }
-        public int LastUploadedDynamicLights { get; private set; }
         public bool IsGpuLightingActive => _useDynamicLightingShader;
         public bool IsDynamicLightingShaderAvailable => GraphicsManager.Instance.DynamicLightingEffect != null;
 
@@ -363,9 +360,7 @@ namespace Client.Main.Controls.Terrain
                 FlushAllTileIndexBatches();
             else
                 FlushAllTileBatches();
-
-            if (!after)
-                _grassRenderer.Draw();
+            _grassRenderer.Flush();
         }
 
         private void ResetMetrics()
@@ -374,47 +369,10 @@ namespace Client.Main.Controls.Terrain
             DrawnTriangles = 0;
             DrawnBlocks = 0;
             DrawnCells = 0;
-            LastUploadedDynamicLights = 0;
 
             // Reset state tracking for new frame
             _lastBoundTexture = null;
             _lastBlendState = null;
-            ResetBatchTracking();
-        }
-
-        private void ResetBatchTracking()
-        {
-            for (int i = 0; i < _activeTileIndexTextures.Count; i++)
-            {
-                int t = _activeTileIndexTextures[i];
-                _tileIndexCounts[t] = 0;
-                _tileIndexActive[t] = false;
-            }
-            _activeTileIndexTextures.Clear();
-
-            for (int i = 0; i < _activeTileAlphaIndexTextures.Count; i++)
-            {
-                int t = _activeTileAlphaIndexTextures[i];
-                _tileAlphaIndexCounts[t] = 0;
-                _tileAlphaIndexActive[t] = false;
-            }
-            _activeTileAlphaIndexTextures.Clear();
-
-            for (int i = 0; i < _activeTileBatchTextures.Count; i++)
-            {
-                int t = _activeTileBatchTextures[i];
-                _tileBatchCounts[t] = 0;
-                _tileBatchActive[t] = false;
-            }
-            _activeTileBatchTextures.Clear();
-
-            for (int i = 0; i < _activeTileAlphaBatchTextures.Count; i++)
-            {
-                int t = _activeTileAlphaBatchTextures[i];
-                _tileAlphaCounts[t] = 0;
-                _tileAlphaBatchActive[t] = false;
-            }
-            _activeTileAlphaBatchTextures.Clear();
         }
 
         private bool BuildVisibleLodGrid()
@@ -604,16 +562,8 @@ namespace Client.Main.Controls.Terrain
             effect.Parameters["Projection"]?.SetValue(Camera.Instance.Projection);
             effect.Parameters["WorldViewProjection"]?.SetValue(world * Camera.Instance.View * Camera.Instance.Projection);
             effect.Parameters["EyePosition"]?.SetValue(Camera.Instance.Position);
-            // Use terrain-specific technique, with a reduced variant for integrated GPUs.
-            string preferredTechnique = Constants.OPTIMIZE_FOR_INTEGRATED_GPU
-                ? "DynamicLighting_Terrain_Low"
-                : "DynamicLighting_Terrain";
-            var terrainTechnique = TryGetTechnique(effect, preferredTechnique) ??
-                                   TryGetTechnique(effect, "DynamicLighting_Terrain");
-            if (terrainTechnique == null)
-                return false;
-
-            effect.CurrentTechnique = terrainTechnique;
+            // Use terrain technique instead of setting uniforms (better performance, no shader branches)
+            effect.CurrentTechnique = effect.Techniques["DynamicLighting_Terrain"];
             effect.Parameters["UseProceduralTerrainUV"]?.SetValue(_useTerrainIndexBatching ? 1.0f : 0.0f);
             effect.Parameters["IsWaterTexture"]?.SetValue(0.0f);
             effect.Parameters["TerrainUvScale"]?.SetValue(Vector2.Zero);
@@ -650,41 +600,171 @@ namespace Client.Main.Controls.Terrain
         {
             if (!Constants.ENABLE_DYNAMIC_LIGHTS)
             {
-                _dynamicLightUploader.Clear(effect);
-                LastUploadedDynamicLights = 0;
+                effect.Parameters["ActiveLightCount"]?.SetValue(0);
+                effect.Parameters["MaxLightsToProcess"]?.SetValue(0);
                 return;
             }
 
-            var visibleLights = _lightManager.VisibleLights;
-            if (visibleLights == null || visibleLights.Count == 0)
+            int maxLights = Math.Min(DynamicLightArrayCapacity, _cachedLightPositions.Length);
+            int version = _lightManager.ActiveLightsVersion;
+
+            // Only rebuild when the light snapshot changes (throttled at
+            // DYNAMIC_LIGHT_UPDATE_FPS).  Between updates, reuse the cached arrays.
+            if (version != _lastLightsVersion)
             {
-                _dynamicLightUploader.Clear(effect);
-                LastUploadedDynamicLights = 0;
-                return;
+                _lastLightsVersion = version;
+                _lastLightCount = 0;
+
+                var activeLights = _lightManager.ActiveLights;
+                if (activeLights != null && activeLights.Count > 0)
+                {
+                    if (activeLights.Count <= maxLights)
+                    {
+                        // All lights fit — copy in natural order.  No scoring or
+                        // sorting needed because the shader processes ALL uploaded
+                        // lights (TERRAIN_MAX_LIGHTS == MAX_LIGHTS).  Stable order
+                        // eliminates flickering from lights swapping rank each snapshot.
+                        int count = activeLights.Count;
+                        for (int i = 0; i < count; i++)
+                        {
+                            var light = activeLights[i];
+                            _cachedLightPositions[i] = light.Position;
+                            _cachedLightColors[i] = light.Color;
+                            _cachedLightRadii[i] = light.Radius;
+                            _cachedLightIntensities[i] = light.Intensity;
+                        }
+                        _lastLightCount = count;
+                    }
+                    else
+                    {
+                        // Rare: more active lights than array capacity — pick best by proximity.
+                        Vector2 focusPos = Camera.Instance != null
+                            ? new Vector2(Camera.Instance.Target.X, Camera.Instance.Target.Y)
+                            : Vector2.Zero;
+                        _lastLightCount = SelectLightsByProximity(activeLights, focusPos, maxLights);
+                    }
+                }
             }
 
-            int maxLights = Math.Min(
-                DynamicLightGpuUploader.ResolveEffectCapacity(effect, DynamicLightArrayCapacity),
-                Constants.OPTIMIZE_FOR_INTEGRATED_GPU ? 16 : DynamicLightArrayCapacity);
-            Vector2 focusPos = Camera.Instance != null
-                ? new Vector2(Camera.Instance.Target.X, Camera.Instance.Target.Y)
-                : Vector2.Zero;
-            float focusRadius = ResolveTerrainDynamicLightFocusRadius();
-
-            LastUploadedDynamicLights = _dynamicLightUploader.Upload(effect, visibleLights, focusPos, maxLights, focusRadius);
+            effect.Parameters["ActiveLightCount"]?.SetValue(_lastLightCount);
+            effect.Parameters["MaxLightsToProcess"]?.SetValue(maxLights);
+            if (_lastLightCount > 0)
+            {
+                effect.Parameters["LightPositions"]?.SetValue(_cachedLightPositions);
+                effect.Parameters["LightColors"]?.SetValue(_cachedLightColors);
+                effect.Parameters["LightRadii"]?.SetValue(_cachedLightRadii);
+                effect.Parameters["LightIntensities"]?.SetValue(_cachedLightIntensities);
+            }
         }
 
-        private static float ResolveTerrainDynamicLightFocusRadius()
+        /// <summary>
+        /// Selects up to <paramref name="maxLights"/> from the active light pool,
+        /// ranked by proximity-weighted intensity, and sorts the result descending
+        /// so the first slots contain the most impactful lights.
+        /// </summary>
+        private int SelectLightsByProximity(
+            IReadOnlyList<DynamicLightSnapshot> activeLights,
+            Vector2 focusPos,
+            int maxLights)
         {
-            var camera = Camera.Instance;
-            if (camera == null)
-                return Constants.MAX_CAMERA_DISTANCE;
+            maxLights = Math.Min(maxLights, _cachedLightPositions.Length);
+            if (activeLights == null || activeLights.Count == 0 || maxLights <= 0)
+                return 0;
 
-            float cameraDistance = Vector3.Distance(camera.Position, camera.Target);
-            if (!float.IsFinite(cameraDistance) || cameraDistance <= 0f)
-                return Constants.MAX_CAMERA_DISTANCE;
+            int selected = 0;
+            float weakestScore = float.MaxValue;
+            int weakestIndex = 0;
 
-            return MathHelper.Clamp(cameraDistance * 1.9f, 1200f, 4200f);
+            for (int i = 0; i < activeLights.Count; i++)
+            {
+                var light = activeLights[i];
+                float radius = light.Radius;
+                float radiusSq = radius * radius;
+                if (radiusSq <= 0.001f) continue;
+
+                var lightPos2 = new Vector2(light.Position.X, light.Position.Y);
+                float distSq = Vector2.DistanceSquared(lightPos2, focusPos);
+
+                // Score: intensity weighted by proximity.  radiusSq in the denominator
+                // ensures large-radius lights score higher (they illuminate more terrain).
+                float score = light.Intensity * radiusSq / (radiusSq + distSq + 1f);
+
+                if (selected < maxLights)
+                {
+                    _cachedLightScores[selected] = score;
+                    _cachedLightPositions[selected] = light.Position;
+                    _cachedLightColors[selected] = light.Color;
+                    _cachedLightRadii[selected] = radius;
+                    _cachedLightIntensities[selected] = light.Intensity;
+
+                    if (score < weakestScore)
+                    {
+                        weakestScore = score;
+                        weakestIndex = selected;
+                    }
+
+                    selected++;
+                }
+                else if (score > weakestScore)
+                {
+                    _cachedLightScores[weakestIndex] = score;
+                    _cachedLightPositions[weakestIndex] = light.Position;
+                    _cachedLightColors[weakestIndex] = light.Color;
+                    _cachedLightRadii[weakestIndex] = radius;
+                    _cachedLightIntensities[weakestIndex] = light.Intensity;
+
+                    weakestScore = _cachedLightScores[0];
+                    weakestIndex = 0;
+                    for (int j = 1; j < selected; j++)
+                    {
+                        float s = _cachedLightScores[j];
+                        if (s < weakestScore)
+                        {
+                            weakestScore = s;
+                            weakestIndex = j;
+                        }
+                    }
+                }
+            }
+
+            // Sort descending so the shader's TERRAIN_MAX_LIGHTS limit gets the best lights.
+            if (selected > 1)
+                SortSelectedLightsByScore(selected);
+
+            return selected;
+        }
+
+        /// <summary>
+        /// Insertion sort (descending) on the cached light arrays by score.
+        /// Count is at most 32, so this is fast.
+        /// </summary>
+        private void SortSelectedLightsByScore(int count)
+        {
+            for (int i = 1; i < count; i++)
+            {
+                float key = _cachedLightScores[i];
+                var pos = _cachedLightPositions[i];
+                var col = _cachedLightColors[i];
+                float rad = _cachedLightRadii[i];
+                float inten = _cachedLightIntensities[i];
+
+                int j = i - 1;
+                while (j >= 0 && _cachedLightScores[j] < key)
+                {
+                    _cachedLightScores[j + 1] = _cachedLightScores[j];
+                    _cachedLightPositions[j + 1] = _cachedLightPositions[j];
+                    _cachedLightColors[j + 1] = _cachedLightColors[j];
+                    _cachedLightRadii[j + 1] = _cachedLightRadii[j];
+                    _cachedLightIntensities[j + 1] = _cachedLightIntensities[j];
+                    j--;
+                }
+
+                _cachedLightScores[j + 1] = key;
+                _cachedLightPositions[j + 1] = pos;
+                _cachedLightColors[j + 1] = col;
+                _cachedLightRadii[j + 1] = rad;
+                _cachedLightIntensities[j + 1] = inten;
+            }
         }
 
         private void RenderTerrainBlock(int xi, int yi, bool after, int lodStep, TerrainBlock block = null)
@@ -774,31 +854,13 @@ namespace Client.Main.Controls.Terrain
             if (!HasAnyGroundInTile(xi, yi, lodInt))
                 return;
 
-            int x1 = xi;
-            int y1 = yi;
-            int x2 = xi + lodInt;
-            int y2 = yi;
-            int x3 = xi + lodInt;
-            int y3 = yi + lodInt;
-            int x4 = xi;
-            int y4 = yi + lodInt;
+            int i1 = GetTerrainIndex(xi, yi);
 
-            int i1 = GetTerrainIndexRepeat(x1, y1);
-            int i2 = GetTerrainIndexRepeat(x2, y2);
-            int i3 = GetTerrainIndexRepeat(x3, y3);
-            int i4 = GetTerrainIndexRepeat(x4, y4);
+            int i2 = GetTerrainIndex(xi + lodInt, yi);
+            int i3 = GetTerrainIndex(xi + lodInt, yi + lodInt);
+            int i4 = GetTerrainIndex(xi, yi + lodInt);
 
-            bool canUseIndexedTile = _useTerrainIndexBatching &&
-                                     x1 >= 0 && x1 < Constants.TERRAIN_SIZE &&
-                                     y1 >= 0 && y1 < Constants.TERRAIN_SIZE &&
-                                     x2 >= 0 && x2 < Constants.TERRAIN_SIZE &&
-                                     y2 >= 0 && y2 < Constants.TERRAIN_SIZE &&
-                                     x3 >= 0 && x3 < Constants.TERRAIN_SIZE &&
-                                     y3 >= 0 && y3 < Constants.TERRAIN_SIZE &&
-                                     x4 >= 0 && x4 < Constants.TERRAIN_SIZE &&
-                                     y4 >= 0 && y4 < Constants.TERRAIN_SIZE;
-
-            if (canUseIndexedTile)
+            if (_useTerrainIndexBatching)
             {
                 byte a1i = i1 < _data.Mapping.Alpha.Length ? _data.Mapping.Alpha[i1] : (byte)0;
                 byte a2i = i2 < _data.Mapping.Alpha.Length ? _data.Mapping.Alpha[i2] : (byte)0;
@@ -826,10 +888,14 @@ namespace Client.Main.Controls.Terrain
                     }
                 }
 
+                // Grass is a fine-detail effect; skip for super-tiles (lodInt > 1) to avoid huge per-frame CPU cost.
+                if (lodInt == 1 && Constants.DRAW_GRASS)
+                    _grassRenderer.RenderGrassForTile(xi, yi, xi, yi, lodFactor, WorldIndex);
+
                 return;
             }
 
-            PrepareTileVertices(x1, y1, x2, y2, x3, y3, x4, y4, i1, i2, i3, i4);
+            PrepareTileVertices(xi, yi, i1, i2, i3, i4, lodFactor);
             PrepareTileLights(i1, i2, i3, i4);
             bool renderSkirts = edgeMask != 0;
             if (renderSkirts)
@@ -879,6 +945,9 @@ namespace Client.Main.Controls.Terrain
                 }
             }
 
+            // Grass is a fine-detail effect; skip for super-tiles (lodInt > 1) to avoid huge per-frame CPU cost.
+            if (lodInt == 1 && Constants.DRAW_GRASS)
+                _grassRenderer.RenderGrassForTile(xi, yi, xi, yi, lodFactor, WorldIndex);
         }
 
         private void RenderTileSkirts(int xi, int yi, float lodFactor, byte edgeMask, int textureIndex, bool alphaLayer)
@@ -1081,53 +1150,68 @@ namespace Client.Main.Controls.Terrain
             }
         }
 
-        private void PrepareTileVertices(
-            int x1, int y1,
-            int x2, int y2,
-            int x3, int y3,
-            int x4, int y4,
-            int i1, int i2, int i3, int i4)
+        private void PrepareTileVertices(int xi, int yi, int i1, int i2, int i3, int i4, float lodFactor)
         {
-            SetTempVertexFromSample(0, x1, y1, i1);
-            SetTempVertexFromSample(1, x2, y2, i2);
-            SetTempVertexFromSample(2, x3, y3, i3);
-            SetTempVertexFromSample(3, x4, y4, i4);
-        }
-
-        private void SetTempVertexFromSample(int slot, int worldTileX, int worldTileY, int sampleIndex)
-        {
-            float z;
-            Vector3 normal = Vector3.UnitZ;
-
-            if (_cachedVertexPositions != null &&
-                _cachedVertexNormals != null &&
-                (uint)sampleIndex < (uint)_cachedVertexPositions.Length &&
-                (uint)sampleIndex < (uint)_cachedVertexNormals.Length)
+            if (_cachedVertexPositions != null && _cachedVertexNormals != null)
             {
-                z = _cachedVertexPositions[sampleIndex].Z;
-                normal = _cachedVertexNormals[sampleIndex];
-            }
-            else
-            {
-                z = 0f;
-                if (_data.HeightMap != null && (uint)sampleIndex < (uint)_data.HeightMap.Length)
+                int total = _cachedVertexPositions.Length;
+                if ((uint)i1 < (uint)total &&
+                    (uint)i2 < (uint)total &&
+                    (uint)i3 < (uint)total &&
+                    (uint)i4 < (uint)total)
                 {
-                    z = _data.HeightMap[sampleIndex].R * 1.5f;
-                    var terrainWall = _data.Attributes?.TerrainWall;
-                    if (terrainWall != null &&
-                        (uint)sampleIndex < (uint)terrainWall.Length &&
-                        (terrainWall[sampleIndex] & Client.Data.ATT.TWFlags.Height) != 0)
-                    {
-                        z += SpecialHeight;
-                    }
+                    // Cached positions include height scaling and special-height offsets.
+                    _tempTerrainVertex[0] = _cachedVertexPositions[i1];
+                    _tempTerrainVertex[1] = _cachedVertexPositions[i2];
+                    _tempTerrainVertex[2] = _cachedVertexPositions[i3];
+                    _tempTerrainVertex[3] = _cachedVertexPositions[i4];
+
+                    _tempTerrainNormals[0] = _cachedVertexNormals[i1];
+                    _tempTerrainNormals[1] = _cachedVertexNormals[i2];
+                    _tempTerrainNormals[2] = _cachedVertexNormals[i3];
+                    _tempTerrainNormals[3] = _cachedVertexNormals[i4];
+                    return;
                 }
             }
 
-            _tempTerrainVertex[slot] = new Vector3(
-                worldTileX * Constants.TERRAIN_SCALE,
-                worldTileY * Constants.TERRAIN_SCALE,
-                z);
-            _tempTerrainNormals[slot] = normal;
+            // Fallback for edge tiles that exceed cached array bounds (matches pre-cache behavior).
+            float sx = xi * Constants.TERRAIN_SCALE;
+            float sy = yi * Constants.TERRAIN_SCALE;
+            float ss = Constants.TERRAIN_SCALE * lodFactor;
+
+            SetTempVertex(0, i1, sx, sy);
+            SetTempVertex(1, i2, sx + ss, sy);
+            SetTempVertex(2, i3, sx + ss, sy + ss);
+            SetTempVertex(3, i4, sx, sy + ss);
+        }
+
+        private void SetTempVertex(int slot, int index, float x, float y)
+        {
+            if (_cachedVertexPositions != null &&
+                _cachedVertexNormals != null &&
+                (uint)index < (uint)_cachedVertexPositions.Length &&
+                (uint)index < (uint)_cachedVertexNormals.Length)
+            {
+                _tempTerrainVertex[slot] = _cachedVertexPositions[index];
+                _tempTerrainNormals[slot] = _cachedVertexNormals[index];
+                return;
+            }
+
+            float z = 0f;
+            if (_data.HeightMap != null && (uint)index < (uint)_data.HeightMap.Length)
+            {
+                z = _data.HeightMap[index].R * 1.5f;
+                var terrainWall = _data.Attributes?.TerrainWall;
+                if (terrainWall != null &&
+                    (uint)index < (uint)terrainWall.Length &&
+                    (terrainWall[index] & Client.Data.ATT.TWFlags.Height) != 0)
+                {
+                    z += SpecialHeight;
+                }
+            }
+
+            _tempTerrainVertex[slot] = new Vector3(x, y, z);
+            _tempTerrainNormals[slot] = Vector3.UnitZ;
         }
 
         private void PrepareTileLights(int i1, int i2, int i3, int i4)
@@ -1170,7 +1254,7 @@ namespace Client.Main.Controls.Terrain
 
         private void ApplyCpuDynamicLight(ref Color baseLight, Vector3 pos)
         {
-            var dyn = _lightManager.EvaluateVisibleDynamicLight(new Vector2(pos.X, pos.Y));
+            var dyn = _lightManager.EvaluateDynamicLight(new Vector2(pos.X, pos.Y));
             if (dyn.LengthSquared() < 0.0001f)
                 return;
 
@@ -1199,22 +1283,6 @@ namespace Client.Main.Controls.Terrain
             return effect.Parameters["UseProceduralTerrainUV"] != null &&
                    effect.Parameters["TerrainUvScale"] != null &&
                    effect.Parameters["IsWaterTexture"] != null;
-        }
-
-        private static EffectTechnique TryGetTechnique(Effect effect, string name)
-        {
-            if (effect == null || string.IsNullOrEmpty(name))
-                return null;
-
-            var techniques = effect.Techniques;
-            for (int i = 0; i < techniques.Count; i++)
-            {
-                var technique = techniques[i];
-                if (string.Equals(technique.Name, name, StringComparison.Ordinal))
-                    return technique;
-            }
-
-            return null;
         }
 
         private void EnsureTerrainVertexBuffers()
@@ -1327,8 +1395,6 @@ namespace Client.Main.Controls.Terrain
                 dstOff = 0;
             }
 
-            TrackIndexTexture(texIndex, alphaLayer);
-
             batch[dstOff + 0] = i1;
             batch[dstOff + 1] = i2;
             batch[dstOff + 2] = i3;
@@ -1419,24 +1485,18 @@ namespace Client.Main.Controls.Terrain
         private void FlushAllTileIndexBatches()
         {
             // First pass: render all opaque batches
-            for (int i = 0; i < _activeTileIndexTextures.Count; i++)
+            for (int t = 0; t < 256; t++)
             {
-                int t = _activeTileIndexTextures[i];
                 if (_tileIndexCounts[t] > 0)
                     FlushSingleTextureIndexed(t, alphaLayer: false);
-                _tileIndexActive[t] = false;
             }
-            _activeTileIndexTextures.Clear();
 
             // Second pass: render all alpha batches
-            for (int i = 0; i < _activeTileAlphaIndexTextures.Count; i++)
+            for (int t = 0; t < 256; t++)
             {
-                int t = _activeTileAlphaIndexTextures[i];
                 if (_tileAlphaIndexCounts[t] > 0)
                     FlushSingleTextureIndexed(t, alphaLayer: true);
-                _tileAlphaIndexActive[t] = false;
             }
-            _activeTileAlphaIndexTextures.Clear();
 
             if (_lastBlendState != BlendState.Opaque)
             {
@@ -1456,8 +1516,6 @@ namespace Client.Main.Controls.Terrain
                 FlushSingleTexture(texIndex, alphaLayer);
                 dstOff = 0;
             }
-
-            TrackVertexTexture(texIndex, alphaLayer);
 
             // Manual unroll for better performance than Array.Copy
             batch[dstOff + 0] = verts[0];
@@ -1581,24 +1639,18 @@ namespace Client.Main.Controls.Terrain
             // then ALL alpha layers. This preserves the correct depth/blend order.
 
             // First pass: render all opaque batches
-            for (int i = 0; i < _activeTileBatchTextures.Count; i++)
+            for (int t = 0; t < 256; t++)
             {
-                int t = _activeTileBatchTextures[i];
                 if (_tileBatchCounts[t] > 0)
                     FlushSingleTexture(t, alphaLayer: false);
-                _tileBatchActive[t] = false;
             }
-            _activeTileBatchTextures.Clear();
 
             // Second pass: render all alpha batches
-            for (int i = 0; i < _activeTileAlphaBatchTextures.Count; i++)
+            for (int t = 0; t < 256; t++)
             {
-                int t = _activeTileAlphaBatchTextures[i];
                 if (_tileAlphaCounts[t] > 0)
                     FlushSingleTexture(t, alphaLayer: true);
-                _tileAlphaBatchActive[t] = false;
             }
-            _activeTileAlphaBatchTextures.Clear();
 
             if (_lastBlendState != BlendState.Opaque)
             {
@@ -1607,50 +1659,8 @@ namespace Client.Main.Controls.Terrain
             }
         }
 
-        private void TrackIndexTexture(int texIndex, bool alphaLayer)
-        {
-            if (alphaLayer)
-            {
-                if (_tileAlphaIndexActive[texIndex])
-                    return;
-
-                _tileAlphaIndexActive[texIndex] = true;
-                _activeTileAlphaIndexTextures.Add(texIndex);
-                return;
-            }
-
-            if (_tileIndexActive[texIndex])
-                return;
-
-            _tileIndexActive[texIndex] = true;
-            _activeTileIndexTextures.Add(texIndex);
-        }
-
-        private void TrackVertexTexture(int texIndex, bool alphaLayer)
-        {
-            if (alphaLayer)
-            {
-                if (_tileAlphaBatchActive[texIndex])
-                    return;
-
-                _tileAlphaBatchActive[texIndex] = true;
-                _activeTileAlphaBatchTextures.Add(texIndex);
-                return;
-            }
-
-            if (_tileBatchActive[texIndex])
-                return;
-
-            _tileBatchActive[texIndex] = true;
-            _activeTileBatchTextures.Add(texIndex);
-        }
-
         private static int GetTerrainIndex(int x, int y)
             => y * Constants.TERRAIN_SIZE + x;
-
-        private static int GetTerrainIndexRepeat(int x, int y)
-            => ((y & Constants.TERRAIN_SIZE_MASK) * Constants.TERRAIN_SIZE)
-             + (x & Constants.TERRAIN_SIZE_MASK);
 
         private TerrainVertexPositionColorNormalTexture[] GetTileBatchBuffer(int texIndex, bool alphaLayer)
         {

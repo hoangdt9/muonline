@@ -8,7 +8,6 @@
     <PublishReadyToRun>false</PublishReadyToRun>
     <TieredCompilation>false</TieredCompilation>
     <UseWindowsForms>true</UseWindowsForms>
-    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Icon.ico</ApplicationIcon>
     <AssemblyName>MuMono</AssemblyName>
@@ -37,7 +36,7 @@
     <PackageReference Include="MonoGame.Content.Builder.Task" Version="3.8.4.1" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Client.Main\Client.Main.csproj" AdditionalProperties="MonoGameFramework=MonoGame.Framework.WindowsDX" />
+    <ProjectReference Include="..\Client.Main\Client.Main.csproj" AdditionalProperties="MonoGameFramework=$(MonoGameFramework)" />
   </ItemGroup>
 
 

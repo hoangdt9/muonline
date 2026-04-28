@@ -113,11 +113,9 @@ namespace Client.Main.Objects
         /// Indicates that the object is far from the camera and should be rendered in lower quality.
         /// </summary>
         public bool LowQuality { get; private set; }
-        internal int UpdateOffset => _updateOffset;
         public bool Visible => Status == GameControlStatus.Ready && !Hidden;
         public WorldControl World { get => _world; set { if (_world != value) { var prev = _world; _world = value; OnWorldChanged(value, prev); } } }
         public short Type { get; set; }
-        public bool IsMapPlacementObject { get; set; }
         public Color BoundingBoxColor { get; set; } = Color.GreenYellow;
         protected GraphicsDevice GraphicsDevice => MuGame.Instance.GraphicsDevice;
 
@@ -192,7 +190,10 @@ namespace Client.Main.Objects
                 for (var i = 0; i < snapshot.Count; i++)
                     tasks[i + 1] = snapshot[i].Load();
 
-                await Task.WhenAll(tasks);
+                await Task.WhenAny(
+                    Task.WhenAll(tasks),
+                    Task.Delay(5000)
+                );
 
                 RecalculateWorldPosition();
                 UpdateWorldBoundingBox();
@@ -215,67 +216,57 @@ namespace Client.Main.Objects
         {
             if (Status == GameControlStatus.NonInitialized)
             {
-                // World objects are initialized by WorldControl's budgeted queue.
-                // Keep the legacy fallback for detached/child objects.
-                if (World == null || Parent != null)
-                    Load().ConfigureAwait(false);
-
-                return;
+                Load().ConfigureAwait(false);
             }
             if (Status != GameControlStatus.Ready) return;
 
             // Increment once per *frame time*, not per object update
             _globalFrameCounter = (int)(gameTime.TotalGameTime.TotalSeconds * 60.0);
 
-            if (Constants.SHOW_DEBUG_PANEL)
-            {
-                TotalUpdatesPerformed++;
+            float deltaTime = (float)gameTime.ElapsedGameTime.TotalSeconds;
 
-                if (Environment.TickCount - _lastResetTime > 5000)
-                {
-                    _lastResetTime = Environment.TickCount;
-                    TotalSkippedUpdates = 0;
-                    TotalUpdatesPerformed = 0;
-                }
+            TotalUpdatesPerformed++;
+
+            // Reset debug counters every 5 seconds
+            if (Environment.TickCount - _lastResetTime > 5000)
+            {
+                _lastResetTime = Environment.TickCount;
+                // log these values or display them in debug UI
+                //Console.WriteLine($"WorldObject Optimization: {TotalSkippedUpdates} skipped, {TotalUpdatesPerformed} performed");
+                TotalSkippedUpdates = 0;
+                TotalUpdatesPerformed = 0;
             }
 
-            var scene = World?.Scene;
-            if ((Interactive || Constants.DRAW_BOUNDING_BOXES) && scene != null)
+            if (Interactive || Constants.DRAW_BOUNDING_BOXES)
             {
-                bool uiBlockingHover = scene.MouseHoverControl is not null && scene.MouseHoverControl != scene.World;
-                bool objectBlockingHover = scene.MouseHoverObject is not null;
+                bool uiBlockingHover = World.Scene.MouseHoverControl is not null && World.Scene.MouseHoverControl != World.Scene.World;
+                if (World?.Scene != null)
+                {
+                    var scene = World.Scene;
+                    if (scene.MouseHoverControl != null && scene.MouseHoverControl != scene.World)
+                    {
+                        uiBlockingHover = true;
+                    }
+                }
+
+                bool objectBlockingHover = World.Scene.MouseHoverObject is not null;
 
                 if (!uiBlockingHover && !objectBlockingHover)
                 {
                     bool parentIsMouseHover = Parent?.IsMouseHover ?? false;
 
                     bool wouldBeMouseHover = parentIsMouseHover;
-                    if (!parentIsMouseHover)
+                    if (!parentIsMouseHover && (Interactive || Constants.DRAW_BOUNDING_BOXES))
                     {
-                        bool isImportantHoverCheck = this is WalkerObject;
-                        if (TryBeginHoverCheck(isImportantHoverCheck))
-                        {
-                            float? intersectionDistance = MuGame.Instance.MouseRay.Intersects(BoundingBoxWorld);
-                            ContainmentType contains = BoundingBoxWorld.Contains(MuGame.Instance.MouseRay.Position);
-                            wouldBeMouseHover = intersectionDistance.HasValue || contains == ContainmentType.Contains;
-                        }
-                        else
-                        {
-                            if (Constants.SHOW_DEBUG_PANEL)
-                                TotalSkippedUpdates++;
-
-                            wouldBeMouseHover = false;
-                        }
+                        float? intersectionDistance = MuGame.Instance.MouseRay.Intersects(BoundingBoxWorld);
+                        ContainmentType contains = BoundingBoxWorld.Contains(MuGame.Instance.MouseRay.Position);
+                        wouldBeMouseHover = intersectionDistance.HasValue || contains == ContainmentType.Contains;
                     }
 
                     IsMouseHover = wouldBeMouseHover;
 
-                    if (!parentIsMouseHover && IsMouseHover && scene.MouseHoverObject is null)
-                        scene.MouseHoverObject = this;
-                }
-                else
-                {
-                    IsMouseHover = false;
+                    if (!parentIsMouseHover && IsMouseHover && World.Scene.MouseHoverObject is null)
+                        World.Scene.MouseHoverObject = this;
                 }
             }
             else
@@ -295,7 +286,9 @@ namespace Client.Main.Objects
 
             DrawBoundingBox3D();
 
-            DrawChildrenOnly(gameTime);
+            var objects = Children;
+            for (int i = 0; i < objects.Count; i++)
+                objects[i].Draw(gameTime);
         }
 
         public virtual void DrawAfter(GameTime gameTime)
@@ -308,15 +301,6 @@ namespace Client.Main.Objects
             var objects = Children;
             for (int i = 0; i < objects.Count; i++)
                 objects[i].DrawAfter(gameTime);
-        }
-
-        internal void DrawChildrenOnly(GameTime gameTime)
-        {
-            if (!Visible) return;
-
-            var objects = Children;
-            for (int i = 0; i < objects.Count; i++)
-                objects[i].Draw(gameTime);
         }
 
         /// <summary>
@@ -420,9 +404,6 @@ namespace Client.Main.Objects
             }
 
             Status = GameControlStatus.Disposed;
-
-            // Centralized safeguard: detach any terrain dynamic lights owned by this object.
-            World?.Terrain?.RemoveDynamicLightsByOwner(this);
 
             var children = Children.ToArray();
             for (int i = 0; i < children.Length; i++)
@@ -658,11 +639,6 @@ namespace Client.Main.Objects
 
             _hoverChecksThisFrame++;
             return true;
-        }
-
-        internal void SetLowQuality(bool value)
-        {
-            LowQuality = value;
         }
 
         protected virtual void UpdateWorldBoundingBox()

@@ -6,7 +6,6 @@ using Client.Main.Core.Client;
 using Client.Main.Data;
 using Client.Main.Graphics;
 using Client.Main.Networking;
-using Client.Main.Objects;
 using Client.Main.Scenes;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -15,11 +14,11 @@ using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
 using Microsoft.Xna.Framework.Input.Touch;
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Threading.Tasks;
 
 
 namespace Client.Main
@@ -27,14 +26,37 @@ namespace Client.Main
     public class MuGame : Game
     {
         private const string LocalSettingsFileName = "appsettings.local.json";
-        private const int MaxMainThreadActionsPerFrame = 96;
-        private static readonly TimeSpan MaxMainThreadActionTimePerFrame = TimeSpan.FromMilliseconds(3);
-        private static readonly TimeSpan SimulationFixedStep = TimeSpan.FromSeconds(1.0 / 60.0);
-        private const int SimulationMaxStepsPerFrame = 4;
-        private static readonly TimeSpan SimulationMaxAcceptedElapsed = TimeSpan.FromMilliseconds(250);
         // Static Fields
         private static Controllers.TaskScheduler _taskScheduler;
-        private static readonly MainThreadDispatcher _mainThreadDispatcher = new(null, MaxMainThreadActionsPerFrame, MaxMainThreadActionTimePerFrame);
+        private static readonly ConcurrentQueue<IMainThreadAction> _mainThreadActions = new ConcurrentQueue<IMainThreadAction>();
+
+        private interface IMainThreadAction
+        {
+            void Invoke();
+        }
+
+        private sealed class QueuedAction : IMainThreadAction
+        {
+            private readonly Action _action;
+
+            public QueuedAction(Action action) => _action = action ?? throw new ArgumentNullException(nameof(action));
+
+            public void Invoke() => _action();
+        }
+
+        private sealed class QueuedAction<TState> : IMainThreadAction
+        {
+            private readonly Action<TState> _action;
+            private readonly TState _state;
+
+            public QueuedAction(Action<TState> action, TState state)
+            {
+                _action = action ?? throw new ArgumentNullException(nameof(action));
+                _state = state;
+            }
+
+            public void Invoke() => _action(_state);
+        }
 
         // Static Properties
         public static MuGame Instance { get; private set; }
@@ -47,20 +69,10 @@ namespace Client.Main
         public static string LocalSettingsPath => Path.Combine(ConfigDirectory ?? AppContext.BaseDirectory, LocalSettingsFileName);
         public static Controllers.TaskScheduler TaskScheduler => _taskScheduler;
         public static int FrameIndex { get; private set; }
-        public static int MainThreadPendingActions => _mainThreadDispatcher.PendingCount;
-        public static int MainThreadProcessedActionsLastFrame => _mainThreadDispatcher.LastProcessedCount;
-        public static long MainThreadProcessedActionsTotal => _mainThreadDispatcher.TotalProcessedCount;
-        public static int LastSimulationStepCount { get; private set; }
-        public static double LastSimulationAcceptedElapsedMs { get; private set; }
-        public static double LastSimulationAccumulationAlpha { get; private set; }
 
         // Instance Fields
         private readonly GraphicsDeviceManager _graphics;
         private ILogger _logger = AppLoggerFactory?.CreateLogger<MuGame>();
-        private readonly DeterministicFrameClock _simulationClock = new(
-            SimulationFixedStep,
-            SimulationMaxStepsPerFrame,
-            SimulationMaxAcceptedElapsed);
         private bool _networkDisposed = false;
         private float _scaleFactor;
         private bool _effectCacheValid = false;
@@ -154,7 +166,10 @@ namespace Client.Main
         /// <param name="action">The action to execute.</param>
         public static void ScheduleOnMainThread(Action action)
         {
-            _mainThreadDispatcher.Enqueue(action);
+            if (action != null)
+            {
+                _mainThreadActions.Enqueue(new QueuedAction(action));
+            }
         }
 
         /// <summary>
@@ -162,15 +177,10 @@ namespace Client.Main
         /// </summary>
         public static void ScheduleOnMainThread<TState>(Action<TState> action, TState state)
         {
-            _mainThreadDispatcher.Enqueue(action, state);
-        }
-
-        /// <summary>
-        /// Schedules an async action to be started on the main game thread.
-        /// </summary>
-        public static void ScheduleOnMainThread(Func<Task> action)
-        {
-            _mainThreadDispatcher.Enqueue(action);
+            if (action != null)
+            {
+                _mainThreadActions.Enqueue(new QueuedAction<TState>(action, state));
+            }
         }
 
         private static bool ValidateSettings(MuOnlineSettings settings, ILogger logger)
@@ -202,26 +212,8 @@ namespace Client.Main
                     logger.LogError("❌ UI virtual resolution {W}x{H} invalid.", settings.Graphics.UiVirtualWidth, settings.Graphics.UiVirtualHeight);
                     isValid = false;
                 }
-
-                settings.Graphics.DynamicLightUpdateFps = Constants.ClampPerformanceFps(settings.Graphics.DynamicLightUpdateFps);
-                settings.Graphics.AnimationUpdateFps = Constants.ClampPerformanceFps(settings.Graphics.AnimationUpdateFps);
             }
             return isValid;
-        }
-
-        private static void ApplyPerformanceCapsFromSettings(GraphicsSettings graphics)
-        {
-            if (graphics == null)
-                return;
-
-            int dynamicLightUpdateFps = Constants.ClampPerformanceFps(graphics.DynamicLightUpdateFps);
-            int animationUpdateFps = Constants.ClampPerformanceFps(graphics.AnimationUpdateFps);
-
-            graphics.DynamicLightUpdateFps = dynamicLightUpdateFps;
-            graphics.AnimationUpdateFps = animationUpdateFps;
-
-            Constants.DYNAMIC_LIGHT_UPDATE_FPS = dynamicLightUpdateFps;
-            Constants.ANIMATION_UPDATE_FPS = animationUpdateFps;
         }
 
         public static void DisposeInstance()
@@ -284,36 +276,13 @@ namespace Client.Main
             }
         }
 
-        private static (string Directory, string FileName) ResolveSettingsFileLocation()
-        {
-            string configuredPath = string.IsNullOrWhiteSpace(Constants.SETTINGS_PATH)
-                ? "appsettings.json"
-                : Constants.SETTINGS_PATH;
-
-            if (Path.IsPathRooted(configuredPath))
-            {
-                string fullPath = Path.GetFullPath(configuredPath);
-                return (Path.GetDirectoryName(fullPath) ?? AppContext.BaseDirectory, Path.GetFileName(fullPath));
-            }
-
-            // Prefer output folder so "dotnet run --project ..." works from any cwd.
-            string outputCandidate = Path.Combine(AppContext.BaseDirectory, configuredPath);
-            if (File.Exists(outputCandidate))
-            {
-                return (Path.GetDirectoryName(outputCandidate) ?? AppContext.BaseDirectory, Path.GetFileName(outputCandidate));
-            }
-
-            string currentDirectoryCandidate = Path.GetFullPath(configuredPath);
-            return (Path.GetDirectoryName(currentDirectoryCandidate) ?? AppContext.BaseDirectory, Path.GetFileName(currentDirectoryCandidate));
-        }
-
         protected override void Initialize()
         {
-            (string configDirectory, string configFileName) = ResolveSettingsFileLocation();
-            ConfigDirectory = configDirectory;
+            var fullPath = Path.GetFullPath(Constants.SETTINGS_PATH);
+            ConfigDirectory = Path.GetDirectoryName(fullPath)!;
             AppConfiguration = new ConfigurationBuilder()
                 .SetBasePath(ConfigDirectory)
-                .AddJsonFile(configFileName, optional: false, reloadOnChange: true)
+                .AddJsonFile(Constants.SETTINGS_PATH, optional: false, reloadOnChange: true)
                 .AddJsonFile(LocalSettingsFileName, optional: true, reloadOnChange: true)
                 .Build();
 
@@ -323,20 +292,15 @@ namespace Client.Main
                 builder.ClearProviders();
                 // Configure logging based on appsettings.json
                 builder.AddConfiguration(AppConfiguration.GetSection("Logging"));
-
-                bool enableSimpleConsole = AppConfiguration.GetValue("Logging:SimpleConsole:Enabled", false);
-                if (enableSimpleConsole)
+                // Add Console logger (can add others like Debug, File)
+                builder.AddSimpleConsole(options =>
                 {
-                    // Console logging is intentionally opt-in to avoid runtime I/O overhead in gameplay hot paths.
-                    builder.AddSimpleConsole(options =>
-                    {
-                        AppConfiguration.GetSection("Logging:SimpleConsole").Bind(options);
-                    });
-                }
+                    AppConfiguration.GetSection("Logging:SimpleConsole").Bind(options);
+                    options.IncludeScopes = true; // Optional: Include scopes if you use them
+                });
             });
 
             _logger = AppLoggerFactory.CreateLogger<MuGame>();
-            _mainThreadDispatcher.SetLogger(_logger);
             var bootLogger = AppLoggerFactory.CreateLogger("MuGame.Boot"); // Logger for startup
 
             // --- Load Settings ---
@@ -367,7 +331,6 @@ namespace Client.Main
 
             ApplyGraphicsConfiguration(AppSettings.Graphics);
             GraphicsQualityManager.ApplyFromSettings(AppSettings.Graphics, GraphicsDevice?.Adapter ?? GraphicsAdapter.DefaultAdapter, _logger);
-            ApplyPerformanceCapsFromSettings(AppSettings.Graphics);
             ApplyGraphicsOptions();
 
             // Configure screen size for mobile platforms AFTER graphics device is ready
@@ -441,17 +404,14 @@ namespace Client.Main
         {
             UPSCounter.Instance.CalcUPS(gameTime);
 
-            var simStep = _simulationClock.Advance(gameTime.ElapsedGameTime);
-            LastSimulationStepCount = simStep.StepCount;
-            LastSimulationAcceptedElapsedMs = simStep.AcceptedElapsed.TotalMilliseconds;
-            LastSimulationAccumulationAlpha = simStep.InterpolationAlpha;
-
-            int workScale = Math.Max(1, simStep.StepCount);
-
-            ProcessMainThreadActions(workScale);
+            // --- Process Main Thread Actions via TaskScheduler ---
+            while (_mainThreadActions.TryDequeue(out var action))
+            {
+                _taskScheduler.QueueTask(action.Invoke, Controllers.TaskScheduler.Priority.Normal);
+            }
 
             // Process prioritized tasks using the task scheduler
-            _taskScheduler?.ProcessFrame(workScale);
+            _taskScheduler.ProcessFrame();
 
             try // outer try
             {
@@ -489,11 +449,6 @@ namespace Client.Main
                 _logger?.LogCritical(e, "Unhandled exception in MuGame.Update loop (outside scene/base update)!");
                 // Exit();
             }
-        }
-
-        private void ProcessMainThreadActions(int workScale)
-        {
-            _mainThreadDispatcher.ProcessPending(workScale);
         }
 
         protected override void LoadContent()
@@ -542,18 +497,10 @@ namespace Client.Main
                 // Initialize frame-based optimizations
                 DynamicBufferPool.BeginFrame(FrameIndex);
                 BMDLoader.Instance.BeginFrame();
-                ModelObject.BeginFrameGpuSkinningMetrics();
 
                 FPSCounter.Instance.CalcFPS(gameTime);
-                if (ShouldUseIntermediateRenderTarget())
-                {
-                    DrawSceneToMainRenderTarget(gameTime);
-                    ApplyPostProcessingEffects();
-                }
-                else
-                {
-                    DrawSceneDirectToBackBuffer(gameTime);
-                }
+                DrawSceneToMainRenderTarget(gameTime);
+                ApplyPostProcessingEffects();
                 base.Draw(gameTime);
             }
             catch (Exception e)
@@ -862,35 +809,6 @@ namespace Client.Main
             GraphicsDevice.SetRenderTarget(null);
         }
 
-        private void DrawSceneDirectToBackBuffer(GameTime gameTime)
-        {
-            GraphicsDevice.SetRenderTarget(null);
-            GraphicsDevice.Clear(Color.Black);
-
-            // Keep the same scene state setup as the intermediate render path.
-            GraphicsDevice.RasterizerState = RasterizerState.CullCounterClockwise;
-            GraphicsDevice.DepthStencilState = DepthStencilState.Default;
-            GraphicsDevice.BlendState = BlendState.AlphaBlend;
-
-            ActiveScene?.Draw(gameTime);
-            ActiveScene?.DrawAfter(gameTime);
-        }
-
-        private static bool ShouldUseIntermediateRenderTarget()
-        {
-            // Required when resolution scaling is active or gamma-correction pass is needed.
-            if (MathF.Abs(Constants.RENDER_SCALE - 1.0f) > 0.0001f || Constants.MSAA_ENABLED)
-                return true;
-
-            var graphics = GraphicsManager.Instance;
-            if (graphics == null)
-                return false;
-
-            bool alphaRgb = graphics.IsAlphaRGBEnabled && graphics.AlphaRGBEffect != null;
-            bool fxaa = graphics.IsFXAAEnabled && graphics.FXAAEffect != null;
-            return alphaRgb || fxaa;
-        }
-
         private void ApplyPostProcessingEffects()
         {
             RenderTarget2D sourceTarget = GraphicsManager.Instance.MainRenderTarget;
@@ -1116,155 +1034,6 @@ namespace Client.Main
             }
         }
 
-        public static bool TryLoadQuickSlotAssignments(
-            string characterName,
-            out int activeSkillSlot,
-            out ushort?[] skillSlots,
-            out (byte Group, int Id)?[] potionSlots)
-        {
-            activeSkillSlot = 3;
-            skillSlots = new ushort?[13];
-            potionSlots = new (byte Group, int Id)?[3];
-
-            string key = NormalizeQuickSlotCharacterKey(characterName);
-            if (key == null)
-            {
-                return false;
-            }
-
-            var logger = AppLoggerFactory?.CreateLogger<MuGame>();
-            try
-            {
-                JsonObject root = LoadLocalSettings(logger);
-                if (root["MuOnlineSettings"] is not JsonObject muSettings ||
-                    muSettings["Ui"] is not JsonObject uiSettings ||
-                    uiSettings["QuickSlots"] is not JsonObject quickSlots ||
-                    quickSlots[key] is not JsonObject characterSlots)
-                {
-                    return false;
-                }
-
-                if (characterSlots["ActiveSkillSlot"] is JsonValue activeValue &&
-                    activeValue.TryGetValue(out int loadedActive))
-                {
-                    activeSkillSlot = loadedActive;
-                }
-
-                if (characterSlots["Skills"] is JsonArray skillsArray)
-                {
-                    for (int i = 0; i < Math.Min(skillSlots.Length, skillsArray.Count); i++)
-                    {
-                        if (skillsArray[i] is JsonValue skillValue &&
-                            skillValue.TryGetValue(out ushort skillId))
-                        {
-                            skillSlots[i] = skillId;
-                        }
-                    }
-                }
-
-                if (characterSlots["Potions"] is JsonArray potionsArray)
-                {
-                    for (int i = 0; i < Math.Min(potionSlots.Length, potionsArray.Count); i++)
-                    {
-                        if (potionsArray[i] is not JsonObject potionObject)
-                            continue;
-
-                        if (potionObject["Group"] is JsonValue groupValue &&
-                            potionObject["Id"] is JsonValue idValue &&
-                            groupValue.TryGetValue(out byte group) &&
-                            idValue.TryGetValue(out int id))
-                        {
-                            potionSlots[i] = (group, id);
-                        }
-                    }
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                logger?.LogWarning(ex, "Failed to load quick slot assignments for character {CharacterName}.", characterName);
-                return false;
-            }
-        }
-
-        public static void PersistQuickSlotAssignments(
-            string characterName,
-            int activeSkillSlot,
-            IReadOnlyList<ushort?> skillSlots,
-            IReadOnlyList<(byte Group, int Id)?> potionSlots)
-        {
-            string key = NormalizeQuickSlotCharacterKey(characterName);
-            if (key == null)
-            {
-                return;
-            }
-
-            var logger = AppLoggerFactory?.CreateLogger<MuGame>();
-            try
-            {
-                Directory.CreateDirectory(ConfigDirectory ?? AppContext.BaseDirectory);
-
-                JsonObject root = LoadLocalSettings(logger);
-                if (root["MuOnlineSettings"] is not JsonObject muSettings)
-                {
-                    muSettings = new JsonObject();
-                    root["MuOnlineSettings"] = muSettings;
-                }
-
-                if (muSettings["Ui"] is not JsonObject uiSettings)
-                {
-                    uiSettings = new JsonObject();
-                    muSettings["Ui"] = uiSettings;
-                }
-
-                if (uiSettings["QuickSlots"] is not JsonObject quickSlots)
-                {
-                    quickSlots = new JsonObject();
-                    uiSettings["QuickSlots"] = quickSlots;
-                }
-
-                var skillsArray = new JsonArray();
-                for (int i = 0; i < skillSlots.Count; i++)
-                {
-                    skillsArray.Add(skillSlots[i].HasValue ? JsonValue.Create(skillSlots[i]!.Value) : null);
-                }
-
-                var potionsArray = new JsonArray();
-                for (int i = 0; i < potionSlots.Count; i++)
-                {
-                    var potion = potionSlots[i];
-                    if (!potion.HasValue)
-                    {
-                        potionsArray.Add(null);
-                        continue;
-                    }
-
-                    potionsArray.Add(new JsonObject
-                    {
-                        ["Group"] = potion.Value.Group,
-                        ["Id"] = potion.Value.Id
-                    });
-                }
-
-                quickSlots[key] = new JsonObject
-                {
-                    ["CharacterName"] = characterName.Trim(),
-                    ["ActiveSkillSlot"] = activeSkillSlot,
-                    ["Skills"] = skillsArray,
-                    ["Potions"] = potionsArray
-                };
-
-                var options = new JsonSerializerOptions { WriteIndented = true };
-                File.WriteAllText(LocalSettingsPath, root.ToJsonString(options));
-                logger?.LogInformation("Saved quick slot assignments for {CharacterName} to {Path}", characterName, LocalSettingsPath);
-            }
-            catch (Exception ex)
-            {
-                logger?.LogWarning(ex, "Failed to persist quick slot assignments for character {CharacterName}.", characterName);
-            }
-        }
-
         public static void PersistGraphicsPreset(GraphicsQualityPreset preset)
         {
             var logger = AppLoggerFactory?.CreateLogger<MuGame>();
@@ -1331,74 +1100,6 @@ namespace Client.Main
             }
         }
 
-        public static void PersistGraphicsPerformanceCaps(int dynamicLightFps, int animationFps)
-        {
-            int clampedDynamicLightFps = Constants.ClampPerformanceFps(dynamicLightFps);
-            int clampedAnimationFps = Constants.ClampPerformanceFps(animationFps);
-
-            var logger = AppLoggerFactory?.CreateLogger<MuGame>();
-            try
-            {
-                Directory.CreateDirectory(ConfigDirectory ?? AppContext.BaseDirectory);
-
-                JsonObject root = LoadLocalSettings(logger);
-                if (root["MuOnlineSettings"] is not JsonObject muSettings)
-                {
-                    muSettings = new JsonObject();
-                    root["MuOnlineSettings"] = muSettings;
-                }
-
-                if (muSettings["Graphics"] is not JsonObject graphics)
-                {
-                    graphics = new JsonObject();
-                    muSettings["Graphics"] = graphics;
-                }
-
-                graphics["DynamicLightUpdateFps"] = clampedDynamicLightFps;
-                graphics["AnimationUpdateFps"] = clampedAnimationFps;
-
-                var options = new JsonSerializerOptions { WriteIndented = true };
-                File.WriteAllText(LocalSettingsPath, root.ToJsonString(options));
-                logger?.LogInformation("Saved graphics performance caps to {Path}", LocalSettingsPath);
-            }
-            catch (Exception ex)
-            {
-                logger?.LogWarning(ex, "Failed to persist graphics performance caps to disk.");
-            }
-        }
-
-        public static void PersistMonsterShadowMode(bool forceMonsterMeshShadows)
-        {
-            var logger = AppLoggerFactory?.CreateLogger<MuGame>();
-            try
-            {
-                Directory.CreateDirectory(ConfigDirectory ?? AppContext.BaseDirectory);
-
-                JsonObject root = LoadLocalSettings(logger);
-                if (root["MuOnlineSettings"] is not JsonObject muSettings)
-                {
-                    muSettings = new JsonObject();
-                    root["MuOnlineSettings"] = muSettings;
-                }
-
-                if (muSettings["Graphics"] is not JsonObject graphics)
-                {
-                    graphics = new JsonObject();
-                    muSettings["Graphics"] = graphics;
-                }
-
-                graphics["ForceMonsterMeshShadows"] = forceMonsterMeshShadows;
-
-                var options = new JsonSerializerOptions { WriteIndented = true };
-                File.WriteAllText(LocalSettingsPath, root.ToJsonString(options));
-                logger?.LogInformation("Saved monster shadow mode to {Path}", LocalSettingsPath);
-            }
-            catch (Exception ex)
-            {
-                logger?.LogWarning(ex, "Failed to persist monster shadow mode to disk.");
-            }
-        }
-
         private static JsonObject LoadLocalSettings(ILogger logger)
         {
             if (!File.Exists(LocalSettingsPath))
@@ -1416,17 +1117,6 @@ namespace Client.Main
                 logger?.LogWarning(ex, "Failed to read existing local settings; recreating file.");
                 return new JsonObject();
             }
-        }
-
-        private static string NormalizeQuickSlotCharacterKey(string characterName)
-        {
-            string trimmed = characterName?.Trim();
-            if (string.IsNullOrWhiteSpace(trimmed) || trimmed == "???")
-            {
-                return null;
-            }
-
-            return trimmed.ToUpperInvariant();
         }
 
         /// <summary>

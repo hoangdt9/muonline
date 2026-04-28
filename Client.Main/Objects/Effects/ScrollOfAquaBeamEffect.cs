@@ -42,7 +42,6 @@ namespace Client.Main.Objects.Effects
         private Texture2D _beamTexture = null!;
 
         private readonly DynamicLight _beamLight;
-        private TerrainControl? _lightTerrain;
         private bool _lightAdded;
 
         public ScrollOfAquaBeamEffect(WalkerObject caster, Vector3? targetPosition = null)
@@ -77,6 +76,12 @@ namespace Client.Main.Objects.Effects
 
             _spriteBatch = GraphicsManager.Instance.Sprite;
             _beamTexture = TextureLoader.Instance.GetTexture2D(BeamTexturePath) ?? GraphicsManager.Instance.Pixel;
+
+            if (World?.Terrain != null && !_lightAdded)
+            {
+                World.Terrain.AddDynamicLight(_beamLight);
+                _lightAdded = true;
+            }
         }
 
         public override void Update(GameTime gameTime)
@@ -88,8 +93,6 @@ namespace Client.Main.Objects.Effects
 
             if (Status != GameControlStatus.Ready)
                 return;
-
-            EnsureDynamicLightAttached();
 
             if (_caster.Status == GameControlStatus.Disposed || _caster.World == null)
             {
@@ -242,30 +245,13 @@ namespace Client.Main.Objects.Effects
 
         public override void Dispose()
         {
-            if (_lightAdded)
+            if (_lightAdded && World?.Terrain != null)
             {
-                TerrainControl? terrain = _lightTerrain ?? World?.Terrain;
-                terrain?.RemoveDynamicLight(_beamLight);
-                terrain?.RemoveDynamicLightsByOwner(this);
+                World.Terrain.RemoveDynamicLight(_beamLight);
                 _lightAdded = false;
-                _lightTerrain = null;
             }
 
             base.Dispose();
-        }
-
-        private void EnsureDynamicLightAttached()
-        {
-            if (_lightAdded || Status != GameControlStatus.Ready)
-                return;
-
-            TerrainControl? terrain = World?.Terrain;
-            if (terrain == null)
-                return;
-
-            _lightTerrain = terrain;
-            _lightTerrain.AddDynamicLight(_beamLight);
-            _lightAdded = true;
         }
     }
 }
