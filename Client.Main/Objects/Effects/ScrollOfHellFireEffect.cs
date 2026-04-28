@@ -57,6 +57,7 @@ namespace Client.Main.Objects.Effects
             _impactLight = new DynamicLight
             {
                 Owner = this,
+                Position = center,
                 Color = new Vector3(1.0f, 0.55f, 0.25f),
                 Radius = 300f,
                 Intensity = 1.5f
@@ -128,6 +129,7 @@ namespace Client.Main.Objects.Effects
             }
 
             SoundController.Instance.PlayBuffer(SoundHellFire);
+            Camera.Instance.Shake(3.5f, CircleLifeFrames / 15f, 20f);
 
             _circle = new HellFireCircleModel(_circlePath, CircleLifeFrames)
             {
@@ -187,9 +189,6 @@ namespace Client.Main.Objects.Effects
 
         private void UpdateDynamicLight(float dt)
         {
-            if (World?.Terrain == null)
-                return;
-
             _time += dt;
 
             bool active = (_circle != null && _circle.Status == GameControlStatus.Ready)
@@ -242,6 +241,7 @@ namespace Client.Main.Objects.Effects
         {
             private readonly string _path;
             private float _lifeFrames;
+            private readonly EdgeTrimDeformer _edgeTrimDeformer = new();
 
             public HellFireCircleModel(string path, float lifeFrames)
             {
@@ -257,6 +257,8 @@ namespace Client.Main.Objects.Effects
                 BlendMeshState = BlendState.Additive;
                 BlendMesh = 0;
             }
+
+            protected override IVertexDeformer GetVertexDeformer() => _edgeTrimDeformer;
 
             public override async Task Load()
             {
@@ -293,6 +295,8 @@ namespace Client.Main.Objects.Effects
         {
             private readonly string _path;
             private float _lifeFrames;
+            private float _scrollTime;
+            private readonly UvScrollDeformer _scrollDeformer = new();
 
             public HellFireCircleLightModel(string path, float lifeFrames)
             {
@@ -309,6 +313,8 @@ namespace Client.Main.Objects.Effects
                 BlendMesh = 0;
             }
 
+            protected override IVertexDeformer GetVertexDeformer() => _scrollDeformer;
+
             public override async Task Load()
             {
                 Model = await BMDLoader.Instance.Prepare(_path);
@@ -320,6 +326,11 @@ namespace Client.Main.Objects.Effects
                 base.Update(gameTime);
                 if (Status != GameControlStatus.Ready)
                     return;
+
+                float dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
+                _scrollTime += dt;
+                _scrollDeformer.OffsetU = _scrollTime * 0.25f;
+                InvalidateBuffers(BufferFlagTexture);
 
                 float factor = FPSCounter.Instance.FPS_ANIMATION_FACTOR;
                 if (_lifeFrames >= 30f)
@@ -341,6 +352,37 @@ namespace Client.Main.Objects.Effects
 
                 Dispose();
             }
+        }
+
+        /// <summary>
+        /// Trims UV edges inward by 5% (maps 0..1 to 0.05..0.95).
+        /// Returns identity position (no vertex deformation).
+        /// </summary>
+        private sealed class EdgeTrimDeformer : IVertexDeformer, ITexCoordDeformer
+        {
+            private const float Margin = 0.05f;
+            private const float Scale = 1f - 2f * Margin; // 0.9
+
+            public Vector3 DeformVertex(in Client.Data.BMD.BMDTextureVertex vertex, in Vector3 transformedPosition)
+                => transformedPosition;
+
+            public Vector2 DeformTexCoord(float u, float v)
+                => new Vector2(Margin + u * Scale, Margin + v * Scale);
+        }
+
+        /// <summary>
+        /// Smoothly scrolls UV coordinates by an animated offset.
+        /// Returns identity position (no vertex deformation).
+        /// </summary>
+        private sealed class UvScrollDeformer : IVertexDeformer, ITexCoordDeformer
+        {
+            public float OffsetU;
+
+            public Vector3 DeformVertex(in Client.Data.BMD.BMDTextureVertex vertex, in Vector3 transformedPosition)
+                => transformedPosition;
+
+            public Vector2 DeformTexCoord(float u, float v)
+                => new Vector2(u + OffsetU, v);
         }
 
         private sealed class HellFireStoneModel : ModelObject
