@@ -36,8 +36,7 @@ namespace Client.Main.Scenes
     {
         // ──────────────────────────── Fields ────────────────────────────
         private readonly HeroObject _hero;
-        private ModernBottomHud _modernHud;
-        private EquipmentDurabilityHud _equipmentDurabilityHud;
+        private readonly MainControl _main;
         private GameSceneMapController _mapController;
         private MapListControl _mapListControl;
         private ChatLogWindow _chatLog;
@@ -53,9 +52,8 @@ namespace Client.Main.Scenes
         private double _pingTimer = 0;
         private int? _lastPingValue = null;
         private PauseMenuControl _pauseMenu; // ESC menu
-        // (SkillQuickSlot removed — replaced by ModernBottomHud)
+        private Controls.UI.Game.Skills.SkillQuickSlot _skillQuickSlot; // Skill quick slot
         private Controls.UI.Game.Skills.SkillSelectionPanel _skillSelectionPanel; // Skill selection panel (independent)
-        private CurrentLocationControl _currentLocationControl; // Current map + coordinates (top-left)
         private ActiveBuffsPanel _activeBuffsPanel; // Active buffs display (top-left corner)
         private Texture2D _backgroundTexture;
         private ProgressBarControl _progressBar;
@@ -106,12 +104,12 @@ namespace Client.Main.Scenes
         {
             _characterInfo = characterInfo;
             _logger?.LogDebug($"GameScene constructor called for Character: {_characterInfo.Name} ({_characterInfo.Class})");
-            var characterState = MuGame.Network.GetCharacterState();
 
             // Create the hero with the appearance data from the character list
             _hero = new HeroObject(new AppearanceData(characterInfo.Appearance));
 
-            // ModernBottomHud is created after _skillSelectionPanel below
+            _main = new MainControl(MuGame.Network.GetCharacterState());
+            Controls.Add(_main);
             Controls.Add(NpcShopControl.Instance);
             Controls.Add(VaultControl.Instance);
             Controls.Add(ChaosMixControl.Instance);
@@ -185,23 +183,19 @@ namespace Client.Main.Scenes
             _skillSelectionPanel = new Controls.UI.Game.Skills.SkillSelectionPanel();
             Controls.Add(_skillSelectionPanel);
 
-            // Modern bottom HUD (replaces MainControl + SkillQuickSlot + ExperienceBar)
-            _modernHud = new ModernBottomHud(characterState, _skillSelectionPanel);
-            Controls.Add(_modernHud);
-            _modernHud.BringToFront();
+            // Skill quick slot
+            _skillQuickSlot = new Controls.UI.Game.Skills.SkillQuickSlot(MuGame.Network.GetCharacterState());
+            _skillQuickSlot.SetSelectionPanel(_skillSelectionPanel); // Connect panel
+            Controls.Add(_skillQuickSlot);
+            _skillQuickSlot.BringToFront();
+            _skillController = new GameSceneSkillController(this, _skillQuickSlot, _logger, _duelController.IsDuelAttackTarget);
 
-            // Right-side low durability warnings (reference: item endurance icons)
-            _equipmentDurabilityHud = new EquipmentDurabilityHud(characterState);
-            Controls.Add(_equipmentDurabilityHud);
-            _skillController = new GameSceneSkillController(this, _modernHud, _logger, _duelController.IsDuelAttackTarget);
+            // Experience bar
+            var experienceBar = new ExperienceBarControl(MuGame.Network.GetCharacterState());
+            Controls.Add(experienceBar);
 
-            // Current location panel (top-left)
-            _currentLocationControl = new CurrentLocationControl(characterState);
-            Controls.Add(_currentLocationControl);
-            _currentLocationControl.BringToFront();
-
-            // Active buffs panel (anchored to the right of location panel)
-            _activeBuffsPanel = new ActiveBuffsPanel(characterState, _currentLocationControl);
+            // Active buffs panel (top-left corner, no border)
+            _activeBuffsPanel = new ActiveBuffsPanel(MuGame.Network.GetCharacterState());
             Controls.Add(_activeBuffsPanel);
             _activeBuffsPanel.BringToFront();
 
@@ -242,7 +236,7 @@ namespace Client.Main.Scenes
             Controls.Add(_progressBar);
             _mapController = new GameSceneMapController(
                 this,
-                _modernHud,
+                _main,
                 _progressBar,
                 _chatLog,
                 _chatInput,
@@ -304,7 +298,7 @@ namespace Client.Main.Scenes
                 {
                     UpdateLoadProgress("Error: CharacterState is null.", 1.0f);
                     _logger?.LogDebug("CharacterState is null in GameScene.Load, cannot proceed.");
-                    _modernHud.Visible = false;
+                    _main.Visible = false;
                     return;
                 }
 
@@ -439,7 +433,7 @@ namespace Client.Main.Scenes
 
                 // Finalize
                 _mapController?.UpdateLoadProgress("Game ready!", 1.0f);
-                _modernHud.Visible = true;
+                _main.Visible = true;
                 _mapController?.UpdateMapName();
             }
             finally
@@ -706,11 +700,6 @@ namespace Client.Main.Scenes
         internal void SetWorldInternal(WorldControl world)
         {
             World = world;
-        }
-
-        internal void NotifyLocalSkillAnimation(ushort skillId)
-        {
-            _skillController?.NotifyLocalSkillAnimation(skillId);
         }
 
         public override void Dispose()

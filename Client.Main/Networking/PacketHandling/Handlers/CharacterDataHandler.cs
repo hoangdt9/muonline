@@ -409,8 +409,6 @@ namespace Client.Main.Networking.PacketHandling.Handlers
             // End teleport state if active (show hero, allow movement)
             bool wasTeleporting = _characterState.IsTeleporting;
             _characterState.EndTeleport();
-            _characterState.ClearPendingPickedItem();
-            _characterState.ClearPendingPickupRawId();
 
             // Update state & notify
             _characterState.UpdatePosition(x, y);
@@ -1164,48 +1162,6 @@ namespace Client.Main.Networking.PacketHandling.Handlers
             return Task.CompletedTask;
         }
 
-        [PacketHandler(0xBA, PacketRouter.NoSubCode)] // SkillStageUpdate (e.g. Nova charge stage)
-        public Task HandleSkillStageUpdateAsync(Memory<byte> packet)
-        {
-            try
-            {
-                if (packet.Length < SkillStageUpdate.Length)
-                {
-                    _logger.LogWarning(
-                        "⚠️ Unexpected length ({Length}) for SkillStageUpdate packet.",
-                        packet.Length);
-                    return Task.CompletedTask;
-                }
-
-                var update = new SkillStageUpdate(packet);
-                ushort playerId = update.ObjectId;
-                byte skillNumber = update.SkillNumber;
-                byte stage = update.Stage;
-
-                _logger.LogDebug("SkillStageUpdate: Player={PlayerId}, Skill={SkillNumber}, Stage={Stage}",
-                    playerId, skillNumber, stage);
-
-                // Nova uses 40 (release) and 58 (start). Servers commonly send 40 here.
-                if (skillNumber != 40 && skillNumber != 58)
-                    return Task.CompletedTask;
-
-                MuGame.ScheduleOnMainThread(() =>
-                {
-                    var activeScene = MuGame.Instance?.ActiveScene as GameScene;
-                    if (activeScene?.World is not WalkableWorldControl world)
-                        return;
-
-                    Objects.Effects.ScrollOfNovaChargeEffect.UpdateStage(world, playerId, stage);
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "💥 Error handling SkillStageUpdate packet.");
-            }
-
-            return Task.CompletedTask;
-        }
-
         [PacketHandler(0x19, PacketRouter.NoSubCode)] // SkillAnimation (Targeted)
         public Task HandleSkillAnimationAsync(Memory<byte> packet)
         {
@@ -1227,8 +1183,6 @@ namespace Client.Main.Networking.PacketHandling.Handlers
                     // Check if this is our player
                     if (playerId == _characterState.Id)
                     {
-                        activeScene.NotifyLocalSkillAnimation(skillId);
-
                         int animationId = Core.Utilities.SkillDatabase.GetSkillAnimation(skillId);
                         string soundPath = Client.Data.BMD.SkillDefinitions.GetSkillSound(skillId);
 
@@ -1291,11 +1245,8 @@ namespace Client.Main.Networking.PacketHandling.Handlers
 
                             if (Objects.Effects.Skills.SkillVisualEffectRegistry.TrySpawn(skillId, effectContext, out var effect))
                             {
-                                if (effect!.World == null)
-                                    world.Objects.Add(effect);
-
-                                if (effect.Status == GameControlStatus.NonInitialized)
-                                    _ = effect.Load();
+                                world.Objects.Add(effect!);
+                                _ = effect!.Load();
                             }
                         }
                     }
@@ -1337,8 +1288,6 @@ namespace Client.Main.Networking.PacketHandling.Handlers
                     // Check if this is our player
                     if (playerId == _characterState.Id)
                     {
-                        activeScene.NotifyLocalSkillAnimation(skillId);
-
                         // Get animation from SkillDatabase
                         int animationId = Core.Utilities.SkillDatabase.GetSkillAnimation(skillId);
                         string soundPath = Client.Data.BMD.SkillDefinitions.GetSkillSound(skillId);
@@ -1383,13 +1332,7 @@ namespace Client.Main.Networking.PacketHandling.Handlers
                             };
 
                             if (Objects.Effects.Skills.SkillVisualEffectRegistry.TrySpawn(skillId, effectContext, out var effect))
-                            {
-                                if (effect!.World == null)
-                                    world.Objects.Add(effect);
-
-                                if (effect.Status == GameControlStatus.NonInitialized)
-                                    _ = effect.Load();
-                            }
+                                world.Objects.Add(effect!);
                         }
                     }
                     else

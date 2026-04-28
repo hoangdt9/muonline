@@ -55,17 +55,6 @@ namespace Client.Main.Content
 
         // Track chosen index element size per mesh (true => 16-bit)
         private readonly Dictionary<MeshCacheKey, bool> _indexIs16Bit = [];
-        // Static buffers for GPU skinning path (no per-frame vertex uploads)
-        private readonly Dictionary<MeshCacheKey, VertexBuffer> _gpuSkinVertexBuffers = [];
-        private readonly Dictionary<MeshCacheKey, IndexBuffer> _gpuSkinIndexBuffers = [];
-        private readonly Dictionary<MeshCacheKey, int> _gpuSkinBoneCounts = [];
-        private const int ParallelCpuSkinningVertexThreshold = 1200;
-        private const int ParallelTriangleAssemblyThreshold = 400;
-        private static readonly bool EnableParallelCpuSkinning = Environment.ProcessorCount > 1;
-        private static readonly ParallelOptions CpuSkinningParallelOptions = new()
-        {
-            MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1)
-        };
 
         // Per-frame instrumentation (queried by DebugPanel)
         public int FrameVBUpdates { get; private set; }
@@ -166,11 +155,6 @@ namespace Client.Main.Content
 
         public void SetGraphicsDevice(GraphicsDevice graphicsDevice)
         {
-            if (!ReferenceEquals(_graphicsDevice, graphicsDevice))
-            {
-                DisposeGpuSkinnedBuffers();
-            }
-
             _graphicsDevice = graphicsDevice;
         }
 
@@ -205,46 +189,6 @@ namespace Client.Main.Content
                 p.X * m.M11 + p.Y * m.M21 + p.Z * m.M31 + m.M41,
                 p.X * m.M12 + p.Y * m.M22 + p.Z * m.M32 + m.M42,
                 p.X * m.M13 + p.Y * m.M23 + p.Z * m.M33 + m.M43);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Vector3 FastTransformNormal(in Matrix m, in System.Numerics.Vector3 n)
-        {
-            return new Vector3(
-                n.X * m.M11 + n.Y * m.M21 + n.Z * m.M31,
-                n.X * m.M12 + n.Y * m.M22 + n.Z * m.M32,
-                n.X * m.M13 + n.Y * m.M23 + n.Z * m.M33);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool TryResolveNormalBoneIndex(BMDTextureMesh mesh, int normalIndex, out int boneIndex)
-        {
-            boneIndex = 0;
-            if (mesh == null || mesh.Normals == null || mesh.Vertices == null ||
-                (uint)normalIndex >= (uint)mesh.Normals.Length)
-            {
-                return false;
-            }
-
-            var normal = mesh.Normals[normalIndex];
-            if (normal.Node >= 0)
-            {
-                boneIndex = normal.Node;
-                return true;
-            }
-
-            int bindVertexIndex = normal.BindVertex;
-            if ((uint)bindVertexIndex < (uint)mesh.Vertices.Length)
-            {
-                short bindVertexBone = mesh.Vertices[bindVertexIndex].Node;
-                if (bindVertexBone >= 0)
-                {
-                    boneIndex = bindVertexBone;
-                    return true;
-                }
-            }
-
-            return false;
         }
 
         public Task<BMD> Prepare(string path, string textureFolder = null)
@@ -374,55 +318,46 @@ namespace Client.Main.Content
             }
             int totalIndices = totalVertices;
             bool prefer16Bit = totalIndices <= ushort.MaxValue;
-            bool useCache = !DisableGlobalMeshCache && !skipCache;
 
             // Create cache key based on asset and mesh
             // (reusing cacheKey defined above)
-            int boneMatrixHash = 0;
-            if (useCache)
+
+            // Calculate bone matrix hash for cache validation
+            // Build or get the set of bones used by this mesh (distinct node indices)
+            if (!_meshUsedBones.TryGetValue(cacheKey, out short[] usedBones))
             {
-                // Build or get the set of bones used by this mesh (distinct node indices)
-                if (!_meshUsedBones.TryGetValue(cacheKey, out short[] usedBones))
+                var verts = mesh.Vertices;
+                // Use HashSet to gather distinct nodes, then convert to array
+                var set = new HashSet<short>();
+                for (int i = 0; i < verts.Length; i++)
                 {
-                    var verts = mesh.Vertices;
-                    var set = new HashSet<short>();
-                    for (int i = 0; i < verts.Length; i++)
-                    {
-                        short node = verts[i].Node;
-                        if (node >= 0)
-                            set.Add(node);
-                    }
-
-                    var normals = mesh.Normals;
-                    for (int i = 0; i < normals.Length; i++)
-                    {
-                        if (TryResolveNormalBoneIndex(mesh, i, out int normalBone) && normalBone >= 0)
-                            set.Add((short)normalBone);
-                    }
-
-                    usedBones = set.Count > 0 ? set.ToArray() : Array.Empty<short>();
-                    _meshUsedBones[cacheKey] = usedBones;
+                    short node = verts[i].Node;
+                    if (node >= 0) set.Add(node);
                 }
-
-                // Calculate a hash over only the bones influencing this mesh
-                boneMatrixHash = CalculateBoneMatrixHashSubset(boneMatrix, usedBones);
-
-                bool canUseCache = _bufferCacheState.TryGetValue(cacheKey, out var cacheEntry) &&
-                                   cacheEntry.IsValid &&
-                                   cacheEntry.LastColor == color &&
-                                   cacheEntry.LastBoneMatrixHash == boneMatrixHash &&
-                                   vertexBuffer != null &&
-                                   indexBuffer != null;
-
-                if (canUseCache)
-                {
-                    FrameCacheHits++;
-                    return;
-                }
-
-                FrameCacheMisses++;
+                usedBones = set.Count > 0 ? set.ToArray() : Array.Empty<short>();
+                _meshUsedBones[cacheKey] = usedBones;
             }
 
+            // Calculate a hash over only the bones influencing this mesh
+            int boneMatrixHash = CalculateBoneMatrixHashSubset(boneMatrix, usedBones);
+
+            bool canUseCache = !DisableGlobalMeshCache &&
+                               !skipCache &&
+                               _bufferCacheState.TryGetValue(cacheKey, out var cacheEntry) &&
+                               cacheEntry.IsValid &&
+                               cacheEntry.LastColor == color &&
+                               cacheEntry.LastBoneMatrixHash == boneMatrixHash &&
+                               vertexBuffer != null &&
+                               indexBuffer != null;
+
+            // Check if we can use cached data (only if caching is enabled)
+            if (canUseCache)
+            {
+                // Cache hit - reuse existing buffers
+                FrameCacheHits++;
+                return;
+            }
+            FrameCacheMisses++;
             FrameMeshesProcessed++;
 
             // Ensure buffers are properly sized
@@ -467,165 +402,60 @@ namespace Client.Main.Content
             // Build vertex data with unique-vertex transform caching
             VertexPositionColorNormalTexture[] vertices = null;
             Vector3[] posCache = null;
-            Vector3[] normalCache = null;
             bool[] visited = null;
-            bool[] normalVisited = null;
-            int[] triangleOffsets = null;
             ITexCoordDeformer texCoordDeformer = vertexDeformer as ITexCoordDeformer;
 
             try
             {
                 vertices = ArrayPool<VertexPositionColorNormalTexture>.Shared.Rent(totalVertices);
                 posCache = ArrayPool<Vector3>.Shared.Rent(mesh.Vertices.Length);
-                normalCache = ArrayPool<Vector3>.Shared.Rent(mesh.Normals.Length);
-                bool useParallelTransform = EnableParallelCpuSkinning &&
-                                            vertexDeformer == null &&
-                                            mesh.Vertices.Length >= ParallelCpuSkinningVertexThreshold;
-                bool useParallelAssembly = useParallelTransform &&
-                                           mesh.Triangles.Length >= ParallelTriangleAssemblyThreshold;
-
-                if (!useParallelTransform)
-                {
-                    visited = ArrayPool<bool>.Shared.Rent(mesh.Vertices.Length);
-                    normalVisited = ArrayPool<bool>.Shared.Rent(mesh.Normals.Length);
-                    Array.Clear(visited, 0, mesh.Vertices.Length);
-                    Array.Clear(normalVisited, 0, mesh.Normals.Length);
-                }
+                visited = ArrayPool<bool>.Shared.Rent(mesh.Vertices.Length);
+                Array.Clear(visited, 0, mesh.Vertices.Length);
 
                 int v = 0;
                 int uniqueTransformed = 0;
-
-                if (useParallelTransform)
+                foreach (var tri in mesh.Triangles)
                 {
-                    var meshVertices = mesh.Vertices;
-                    var meshNormals = mesh.Normals;
-                    int boneCount = boneMatrix.Length;
-
-                    Parallel.For(0, meshVertices.Length, CpuSkinningParallelOptions, vi =>
+                    for (int j = 0; j < tri.Polygon; j++)
                     {
-                        var vert = meshVertices[vi];
-                        if (vert.Node >= 0 && vert.Node < boneCount)
+                        int vi = tri.VertexIndex[j];
+
+                        if (!visited[vi])
                         {
-                            posCache[vi] = FastTransformPosition(in boneMatrix[vert.Node], in vert.Position);
-                        }
-                        else
-                        {
-                            posCache[vi] = vert.Position;
-                        }
-                    });
-
-                    Parallel.For(0, meshNormals.Length, CpuSkinningParallelOptions, ni =>
-                    {
-                        var srcNormal = meshNormals[ni];
-                        if (TryResolveNormalBoneIndex(mesh, ni, out int normalBoneIndex) &&
-                            (uint)normalBoneIndex < (uint)boneCount)
-                        {
-                            normalCache[ni] = FastTransformNormal(in boneMatrix[normalBoneIndex], in srcNormal.Normal);
-                        }
-                        else
-                        {
-                            normalCache[ni] = srcNormal.Normal;
-                        }
-                    });
-
-                    uniqueTransformed = meshVertices.Length;
-                }
-
-                if (useParallelAssembly)
-                {
-                    // Phase 2: assemble final vertex stream in parallel. Every triangle
-                    // writes to its own contiguous output range, so there are no races.
-                    int triCount = mesh.Triangles.Length;
-                    triangleOffsets = ArrayPool<int>.Shared.Rent(triCount);
-                    int offset = 0;
-                    for (int i = 0; i < triCount; i++)
-                    {
-                        triangleOffsets[i] = offset;
-                        offset += mesh.Triangles[i].Polygon;
-                    }
-
-                    Parallel.For(0, triCount, CpuSkinningParallelOptions, triIndex =>
-                    {
-                        var tri = mesh.Triangles[triIndex];
-                        int dst = triangleOffsets[triIndex];
-
-                        for (int j = 0; j < tri.Polygon; j++)
-                        {
-                            int vi = tri.VertexIndex[j];
-                            int ni = tri.NormalIndex[j];
-                            int ti = tri.TexCoordIndex[j];
-
-                            var normal = normalCache[ni];
-                            var uv = mesh.TexCoords[ti];
-
-                            vertices[dst + j] = new VertexPositionColorNormalTexture(
-                                posCache[vi],
-                                color,
-                                normal,
-                                new Vector2(uv.U, uv.V));
-                        }
-                    });
-                }
-                else
-                {
-                    foreach (var tri in mesh.Triangles)
-                    {
-                        for (int j = 0; j < tri.Polygon; j++)
-                        {
-                            int vi = tri.VertexIndex[j];
-
-                            if (!useParallelTransform && !visited[vi])
+                            visited[vi] = true;
+                            uniqueTransformed++;
+                            var vert = mesh.Vertices[vi];
+                            if (vert.Node >= 0 && vert.Node < boneMatrix.Length)
                             {
-                                visited[vi] = true;
-                                uniqueTransformed++;
-                                var vert = mesh.Vertices[vi];
-                                if (vert.Node >= 0 && vert.Node < boneMatrix.Length)
-                                {
-                                    posCache[vi] = FastTransformPosition(in boneMatrix[vert.Node], in vert.Position);
-                                }
-                                else
-                                {
-                                    posCache[vi] = vert.Position;
-                                }
-
-                                if (vertexDeformer != null)
-                                {
-                                    posCache[vi] = vertexDeformer.DeformVertex(in vert, in posCache[vi]);
-                                }
+                                posCache[vi] = FastTransformPosition(in boneMatrix[vert.Node], in vert.Position);
+                            }
+                            else
+                            {
+                                posCache[vi] = vert.Position;
                             }
 
-                            int ni = tri.NormalIndex[j];
-                            if (!useParallelTransform && !normalVisited[ni])
+                            if (vertexDeformer != null)
                             {
-                                normalVisited[ni] = true;
-                                var srcNormal = mesh.Normals[ni];
-                                if (TryResolveNormalBoneIndex(mesh, ni, out int normalBoneIndex) &&
-                                    (uint)normalBoneIndex < (uint)boneMatrix.Length)
-                                {
-                                    normalCache[ni] = FastTransformNormal(in boneMatrix[normalBoneIndex], in srcNormal.Normal);
-                                }
-                                else
-                                {
-                                    normalCache[ni] = srcNormal.Normal;
-                                }
+                                posCache[vi] = vertexDeformer.DeformVertex(in vert, in posCache[vi]);
                             }
-
-                            var normal = normalCache[ni];
-
-                            int ti = tri.TexCoordIndex[j];
-                            var uv = mesh.TexCoords[ti];
-
-                            Vector2 texCoord = texCoordDeformer != null
-                                ? texCoordDeformer.DeformTexCoord(uv.U, uv.V)
-                                : new Vector2(uv.U, uv.V);
-
-                            vertices[v] = new VertexPositionColorNormalTexture(
-                                posCache[vi],
-                                color,
-                                normal,
-                                texCoord);
-                            v++;
                         }
+
+                        int ni = tri.NormalIndex[j];
+                        var normal = mesh.Normals[ni].Normal; // keep as-is (object space path)
+
+                        int ti = tri.TexCoordIndex[j];
+                        var uv = mesh.TexCoords[ti];
+
+                        Vector2 texCoord = texCoordDeformer != null
+                            ? texCoordDeformer.DeformTexCoord(uv.U, uv.V)
+                            : new Vector2(uv.U, uv.V);
+
+                        vertices[v] = new VertexPositionColorNormalTexture(
+                            posCache[vi],
+                            color,
+                            normal,
+                            texCoord);
+                        v++;
                     }
                 }
 
@@ -687,182 +517,10 @@ namespace Client.Main.Content
                     ArrayPool<Vector3>.Shared.Return(posCache);
                 }
 
-                if (normalCache != null)
-                {
-                    ArrayPool<Vector3>.Shared.Return(normalCache);
-                }
-
                 if (visited != null)
                 {
                     ArrayPool<bool>.Shared.Return(visited, clearArray: true);
                 }
-
-                if (normalVisited != null)
-                {
-                    ArrayPool<bool>.Shared.Return(normalVisited, clearArray: true);
-                }
-
-                if (triangleOffsets != null)
-                {
-                    ArrayPool<int>.Shared.Return(triangleOffsets, clearArray: false);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Returns immutable mesh buffers for GPU skinning path.
-        /// Buffers store bind-pose positions and per-vertex bone index.
-        /// </summary>
-        public bool TryGetGpuSkinnedMeshBuffers(
-            BMD asset,
-            int meshIndex,
-            out VertexBuffer vertexBuffer,
-            out IndexBuffer indexBuffer,
-            out int boneCount)
-        {
-            vertexBuffer = null;
-            indexBuffer = null;
-            boneCount = 0;
-
-            if (asset == null || _graphicsDevice == null || asset.Meshes == null ||
-                meshIndex < 0 || meshIndex >= asset.Meshes.Length)
-            {
-                return false;
-            }
-
-            int assetId = RuntimeHelpers.GetHashCode(asset);
-            var cacheKey = new MeshCacheKey(assetId, meshIndex);
-
-            if (_gpuSkinVertexBuffers.TryGetValue(cacheKey, out var cachedVB) &&
-                _gpuSkinIndexBuffers.TryGetValue(cacheKey, out var cachedIB) &&
-                _gpuSkinBoneCounts.TryGetValue(cacheKey, out var cachedBoneCount) &&
-                cachedVB != null && !cachedVB.IsDisposed &&
-                cachedIB != null && !cachedIB.IsDisposed)
-            {
-                vertexBuffer = cachedVB;
-                indexBuffer = cachedIB;
-                boneCount = cachedBoneCount;
-                return true;
-            }
-
-            var mesh = asset.Meshes[meshIndex];
-            if (mesh?.Triangles == null || mesh.Vertices == null || mesh.Normals == null || mesh.TexCoords == null)
-                return false;
-
-            int totalVertices = 0;
-            var triangles = mesh.Triangles;
-            for (int i = 0; i < triangles.Length; i++)
-                totalVertices += triangles[i].Polygon;
-
-            if (totalVertices <= 0)
-                return false;
-
-            bool prefer16Bit = totalVertices <= ushort.MaxValue;
-            var vertices = ArrayPool<SkinnedVertexPositionColorNormalTexture>.Shared.Rent(totalVertices);
-
-            try
-            {
-                int maxBoneIndex = 0;
-                int v = 0;
-
-                for (int triIdx = 0; triIdx < triangles.Length; triIdx++)
-                {
-                    var tri = triangles[triIdx];
-                    for (int j = 0; j < tri.Polygon; j++)
-                    {
-                        int vi = tri.VertexIndex[j];
-                        int ni = tri.NormalIndex[j];
-                        int ti = tri.TexCoordIndex[j];
-
-                        var vert = mesh.Vertices[vi];
-                        int positionBoneIndex = vert.Node >= 0 ? vert.Node : 0;
-                        int normalBoneIndex = positionBoneIndex;
-                        if (TryResolveNormalBoneIndex(mesh, ni, out int resolvedNormalBone) && resolvedNormalBone >= 0)
-                            normalBoneIndex = resolvedNormalBone;
-
-                        if (positionBoneIndex > maxBoneIndex)
-                            maxBoneIndex = positionBoneIndex;
-                        if (normalBoneIndex > maxBoneIndex)
-                            maxBoneIndex = normalBoneIndex;
-
-                        var normal = mesh.Normals[ni].Normal;
-                        var uv = mesh.TexCoords[ti];
-
-                        vertices[v++] = new SkinnedVertexPositionColorNormalTexture(
-                            vert.Position,
-                            Color.White,
-                            normal,
-                            new Vector2(uv.U, uv.V),
-                            new Vector2(positionBoneIndex, normalBoneIndex));
-                    }
-                }
-
-                var newVB = new VertexBuffer(
-                    _graphicsDevice,
-                    SkinnedVertexPositionColorNormalTexture.VertexDeclaration,
-                    totalVertices,
-                    BufferUsage.WriteOnly);
-                newVB.SetData(vertices, 0, totalVertices);
-
-                IndexBuffer newIB;
-                if (prefer16Bit)
-                {
-                    var indices16 = ArrayPool<ushort>.Shared.Rent(totalVertices);
-                    try
-                    {
-                        for (int i = 0; i < totalVertices; i++)
-                            indices16[i] = (ushort)i;
-
-                        newIB = new IndexBuffer(
-                            _graphicsDevice,
-                            IndexElementSize.SixteenBits,
-                            totalVertices,
-                            BufferUsage.WriteOnly);
-                        newIB.SetData(indices16, 0, totalVertices);
-                    }
-                    finally
-                    {
-                        ArrayPool<ushort>.Shared.Return(indices16, clearArray: true);
-                    }
-                }
-                else
-                {
-                    var indices32 = ArrayPool<int>.Shared.Rent(totalVertices);
-                    try
-                    {
-                        for (int i = 0; i < totalVertices; i++)
-                            indices32[i] = i;
-
-                        newIB = new IndexBuffer(
-                            _graphicsDevice,
-                            IndexElementSize.ThirtyTwoBits,
-                            totalVertices,
-                            BufferUsage.WriteOnly);
-                        newIB.SetData(indices32, 0, totalVertices);
-                    }
-                    finally
-                    {
-                        ArrayPool<int>.Shared.Return(indices32, clearArray: true);
-                    }
-                }
-
-                if (_gpuSkinVertexBuffers.TryGetValue(cacheKey, out var oldVB))
-                    oldVB?.Dispose();
-                if (_gpuSkinIndexBuffers.TryGetValue(cacheKey, out var oldIB))
-                    oldIB?.Dispose();
-
-                _gpuSkinVertexBuffers[cacheKey] = newVB;
-                _gpuSkinIndexBuffers[cacheKey] = newIB;
-                _gpuSkinBoneCounts[cacheKey] = maxBoneIndex + 1;
-
-                vertexBuffer = newVB;
-                indexBuffer = newIB;
-                boneCount = maxBoneIndex + 1;
-                return true;
-            }
-            finally
-            {
-                ArrayPool<SkinnedVertexPositionColorNormalTexture>.Shared.Return(vertices);
             }
         }
 
@@ -911,24 +569,6 @@ namespace Client.Main.Content
             _bufferCacheState.Clear();
             _indexInitialized.Clear();
             _indexIs16Bit.Clear();
-            DisposeGpuSkinnedBuffers();
-        }
-
-        private void DisposeGpuSkinnedBuffers()
-        {
-            foreach (var vb in _gpuSkinVertexBuffers.Values)
-            {
-                vb?.Dispose();
-            }
-
-            foreach (var ib in _gpuSkinIndexBuffers.Values)
-            {
-                ib?.Dispose();
-            }
-
-            _gpuSkinVertexBuffers.Clear();
-            _gpuSkinIndexBuffers.Clear();
-            _gpuSkinBoneCounts.Clear();
         }
     }
 

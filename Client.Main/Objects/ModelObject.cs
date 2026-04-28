@@ -39,6 +39,18 @@ namespace Client.Main.Objects
         private static readonly ArrayPool<Matrix> _matrixArrayPool = ArrayPool<Matrix>.Shared;
         private static readonly Dictionary<string, BlendState> _blendStateCache = new Dictionary<string, BlendState>();
 
+        // Cached arrays for dynamic lighting to avoid allocations
+        private static readonly Vector3[] _cachedLightPositions = new Vector3[16];
+        private static readonly Vector3[] _cachedLightColors = new Vector3[16];
+        private static readonly float[] _cachedLightRadii = new float[16];
+        private static readonly float[] _cachedLightIntensities = new float[16];
+        private static readonly float[] _cachedLightScores = new float[16];
+        private const float MinLightInfluence = 0.001f;
+
+        // Cache for Environment.TickCount to reduce system calls
+        private static float _cachedTime = 0f;
+        private static int _lastTickCount = 0;
+
         // Cached common Vector3 instances to avoid allocations
         private static readonly Vector3 _ambientLightVector = new Vector3(0.8f, 0.8f, 0.8f);
         private static readonly Vector3 _redHighlight = new Vector3(1, 0, 0);
@@ -52,24 +64,9 @@ namespace Client.Main.Objects
         private static readonly RasterizerState _cullNone = RasterizerState.CullNone;
 
         private static int _animationStrideSeed = 0;
-        private static int _gpuSkinnedMeshesDrawnThisFrame = 0;
 
         // Track per-pass preparation to avoid re-uploading shared effect parameters per mesh
         private static int _drawModelInvocationCounter = 0;
-        public static int LastFrameGpuSkinnedMeshesDrawn { get; private set; }
-        public static bool IsGpuSkinningBackendSupported => SupportsGpuDynamicSkinning;
-
-        public static void BeginFrameGpuSkinningMetrics()
-        {
-            LastFrameGpuSkinnedMeshesDrawn = _gpuSkinnedMeshesDrawnThisFrame;
-            _gpuSkinnedMeshesDrawnThisFrame = 0;
-            BeginFrameStaticMapInstancingMetrics();
-        }
-
-        private static void RegisterGpuSkinnedMeshDraw()
-        {
-            _gpuSkinnedMeshesDrawnThisFrame++;
-        }
 
         public static ILoggerFactory AppLoggerFactory { get; private set; }
 
@@ -84,10 +81,6 @@ namespace Client.Main.Objects
 
         private DynamicVertexBuffer[] _boneVertexBuffers;
         private DynamicIndexBuffer[] _boneIndexBuffers;
-        private VertexBuffer[] _gpuSkinVertexBuffers;
-        private IndexBuffer[] _gpuSkinIndexBuffers;
-        private int[] _gpuSkinBoneCounts;
-        private bool[] _gpuSkinMeshEnabled;
         private Texture2D[] _boneTextures;
         private TextureScript[] _scriptTextures;
         private TextureData[] _dataTextures;
@@ -100,7 +93,6 @@ namespace Client.Main.Objects
         private bool[] _meshHiddenByScript;
         private bool[] _meshBlendByScript;
         private string[] _meshTexturePath;
-        private int[] _staticMapInstancedMeshFrameTags;
 
         private int[] _blendMeshIndicesScratch;
 
@@ -159,13 +151,6 @@ namespace Client.Main.Objects
         private bool _boneMatrixCacheValid = false;
 
         private MeshBufferCache[] _meshBufferCache;
-        private const int MaxGpuSkinBones = 256;
-#if WINDOWS_DX
-        private const bool SupportsGpuDynamicSkinning = true;
-#else
-        private const bool SupportsGpuDynamicSkinning = false;
-#endif
-        private Matrix[] _gpuSkinBoneUploadBuffer = Array.Empty<Matrix>();
 
         #endregion
 
@@ -180,29 +165,22 @@ namespace Client.Main.Objects
         private Vector2 _lastLightSampleCell = new Vector2(float.MaxValue);
         private Vector3 _lastSampledLight = Vector3.Zero;
 
-        private readonly DynamicLightGpuUploader _dynamicLightUploader = new(32);
+        // Per-object cached light selection (updated on throttled light snapshot version changes)
+        private int _dynamicLightSelectionVersion = -1;
+        private int _dynamicLightSelectionMaxLights = -1;
+        private int _dynamicLightSelectionCount = 0;
+        private int[] _dynamicLightSelectionIndices;
 
         private int _drawModelInvocationId = 0;
         private int _dynamicLightingPreparedInvocationId = -1;
-        private bool _dynamicLightingPreparedWithGpuSkinning = false;
-        private int _dynamicLightingPreparedGpuBoneCount = 0;
 
         #endregion
 
         #region Instance Fields - Cached State
 
-        private float _animationStepAccumulatorSeconds = 0f;
-        private uint _animationPoseVersion = 0;
-        private uint _lastLinkedParentPoseVersion = uint.MaxValue;
-        private ModelObject _lastLinkedParentModel = null;
+        private double _lastAnimationUpdateTime = 0;
         private double _lastFrameTimeMs = 0; // To track timing in methods without GameTime
         private double _lastStrideAnimationBufferUpdateTimeMs = double.NegativeInfinity;
-        private float _drawShaderTimeSeconds = 0f;
-        private int _animationSampleActionIndex = -1;
-        private int _animationSampleFrame0 = 0;
-        private int _animationSampleFrame1 = 0;
-        private int _animationSampleInterpolationBucket = 0;
-        private bool _animationSampleValid = false;
 
         private readonly int _animationStrideOffset;
 
@@ -230,7 +208,7 @@ namespace Client.Main.Objects
                     _model = value;
                     // If the model changes after the object has already been loaded,
                     // we need to re-run the content loading logic to update buffers, textures, etc.
-                    if (Status is GameControlStatus.Ready or GameControlStatus.Error)
+                    if (Status != GameControlStatus.Disposed)
                     {
                         _ = LoadContent();
                     }
@@ -301,8 +279,7 @@ namespace Client.Main.Objects
         /// </summary>
         public virtual bool IsStaticForCaching => !ContinuousAnimation
             && (Model?.Bones == null || Model.Bones.Length == 0)
-            && !RequiresPerFrameAnimation
-            && !UsesMutableMeshData;
+            && !RequiresPerFrameAnimation;
 
         /// <summary>
         /// When true, the animation will stop at the last frame instead of looping.
@@ -325,14 +302,10 @@ namespace Client.Main.Objects
 
         public int AnimationUpdateStride { get; private set; } = 1;
         protected virtual bool RequiresPerFrameAnimation => false;
-        public bool RequiresPerFrameWorldUpdate => RequiresPerFrameAnimation;
         protected virtual bool AllowAnimationUpdates => true;
         protected virtual bool AllowLightingUpdates => true;
         protected virtual bool AllowDynamicLightingShader => true;
-        protected virtual bool AllowMapObjectInstancing => true;
-        protected virtual bool UsesMutableMeshData => false;
         protected virtual bool FreezeDynamicBuffersAfterFirstBuild => false;
-        internal uint AnimationPoseVersion => _animationPoseVersion;
 
         #endregion
 
@@ -373,10 +346,6 @@ namespace Client.Main.Objects
             int meshCount = Model.Meshes.Length;
             _boneVertexBuffers = new DynamicVertexBuffer[meshCount];
             _boneIndexBuffers = new DynamicIndexBuffer[meshCount];
-            _gpuSkinVertexBuffers = new VertexBuffer[meshCount];
-            _gpuSkinIndexBuffers = new IndexBuffer[meshCount];
-            _gpuSkinBoneCounts = new int[meshCount];
-            _gpuSkinMeshEnabled = new bool[meshCount];
             _boneTextures = new Texture2D[meshCount];
             _scriptTextures = new TextureScript[meshCount];
             _dataTextures = new TextureData[meshCount];
@@ -404,19 +373,7 @@ namespace Client.Main.Objects
                     texturePreloadTasks.Add(TextureLoader.Instance.Prepare(texturePath));
                 }
 
-                // Materialize Texture2D later in main-thread render/update path (SetDynamicBuffers).
-                _boneTextures[meshIndex] = null;
-            }
-
-            // Wait for all textures to be preloaded
-            if (texturePreloadTasks.Count > 0)
-            {
-                await Task.WhenAll(texturePreloadTasks);
-            }
-
-            for (int meshIndex = 0; meshIndex < meshCount; meshIndex++)
-            {
-                string texturePath = _meshTexturePath[meshIndex];
+                _boneTextures[meshIndex] = TextureLoader.Instance.GetTexture2D(texturePath);
                 _scriptTextures[meshIndex] = TextureLoader.Instance.GetScript(texturePath);
                 _dataTextures[meshIndex] = TextureLoader.Instance.Get(texturePath);
 
@@ -425,11 +382,16 @@ namespace Client.Main.Objects
                 _meshBlendByScript[meshIndex] = _scriptTextures[meshIndex]?.Bright ?? false;
             }
 
+            // Wait for all textures to be preloaded
+            if (texturePreloadTasks.Count > 0)
+            {
+                await Task.WhenAll(texturePreloadTasks);
+            }
+
             _sortTextureHintDirty = true;
             _sortTextureHint = null;
 
             _blendMeshIndicesScratch = new int[meshCount];
-            _staticMapInstancedMeshFrameTags = new int[meshCount];
 
             // Initialize mesh buffer cache
             _meshBufferCache = new MeshBufferCache[meshCount];
@@ -487,18 +449,8 @@ namespace Client.Main.Objects
                 _isBlending = parent._isBlending;
                 _blendElapsed = parent._blendElapsed;
 
-                if (!ReferenceEquals(_lastLinkedParentModel, parent))
-                {
-                    _lastLinkedParentModel = parent;
-                    _lastLinkedParentPoseVersion = uint.MaxValue;
-                }
-
-                uint parentPoseVersion = parent.AnimationPoseVersion;
-                if (_lastLinkedParentPoseVersion != parentPoseVersion)
-                {
+                if (parent._isBlending || parent.BoneTransform != null)
                     InvalidateBuffers(BUFFER_FLAG_ANIMATION);
-                    _lastLinkedParentPoseVersion = parentPoseVersion;
-                }
             }
 
             if (ParentBoneLink >= 0 || LinkParentAnimation)
@@ -511,9 +463,7 @@ namespace Client.Main.Objects
                     if (!walker.IsMainWalker)
                     {
                         // Keep nearby animations smooth; only throttle when low-quality is active.
-                        // Attachments with animated material effects (e.g. item glow) must stay per-frame.
-                        bool forcePerFrameStride = HasRealtimeMaterialAnimation();
-                        desiredStride = (walker.IsOneShotPlaying || forcePerFrameStride) ? 1 : (LowQuality ? 4 : 1);
+                        desiredStride = walker.IsOneShotPlaying ? 1 : (LowQuality ? 4 : 1);
                     }
 
                     if (AnimationUpdateStride != desiredStride)
@@ -610,10 +560,6 @@ namespace Client.Main.Objects
             // Release graphics resources and mark content as unloaded
             _boneVertexBuffers = null;
             _boneIndexBuffers = null;
-            _gpuSkinVertexBuffers = null;
-            _gpuSkinIndexBuffers = null;
-            _gpuSkinBoneCounts = null;
-            _gpuSkinMeshEnabled = null;
             _boneTextures = null;
             _scriptTextures = null;
             _dataTextures = null;
@@ -621,7 +567,6 @@ namespace Client.Main.Objects
             _meshHiddenByScript = null;
             _meshBlendByScript = null;
             _meshTexturePath = null;
-            _staticMapInstancedMeshFrameTags = null;
             _blendMeshIndicesScratch = null;
             _contentLoaded = false;
             _boundingComputed = false;
@@ -631,10 +576,6 @@ namespace Client.Main.Objects
             _boneMatrixCacheValid = false;
             _meshBufferCache = null;
             _animationStateValid = false;
-            _animationStepAccumulatorSeconds = 0f;
-            _animationPoseVersion = 0;
-            _lastLinkedParentPoseVersion = uint.MaxValue;
-            _lastLinkedParentModel = null;
 
             ReleaseMeshGroups();
             _meshGroupPool.Clear();
@@ -657,23 +598,15 @@ namespace Client.Main.Objects
             return false;
         }
 
-        private bool HasRealtimeMaterialAnimation()
+        private static float GetCachedTime()
         {
-            return Constants.ENABLE_ITEM_MATERIAL_SHADER &&
-                   (ItemLevel >= 7 || IsExcellentItem || IsAncientItem);
-        }
-
-        private void SetDrawShaderTimeSeconds(float timeSeconds)
-        {
-            if (!float.IsNaN(timeSeconds) && !float.IsInfinity(timeSeconds) && timeSeconds >= 0f)
+            int currentTick = Environment.TickCount;
+            if (currentTick != _lastTickCount)
             {
-                _drawShaderTimeSeconds = timeSeconds;
+                _lastTickCount = currentTick;
+                _cachedTime = currentTick * 0.001f;
             }
-        }
-
-        private float GetShaderTimeSeconds()
-        {
-            return _drawShaderTimeSeconds;
+            return _cachedTime;
         }
 
         public void SetAnimationUpdateStride(int stride)

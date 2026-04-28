@@ -23,9 +23,6 @@ namespace Client.Main.Controls
         private float _cursorNextMoveTime;
         private int _previousScrollValue;
         private float _targetCameraDistance;
-        private int _lastMoveTargetX = -1;
-        private int _lastMoveTargetY = -1;
-        private float _cursorIntegrityCheckTimeMs;
 
         // --- Mouse tile caching for performance ---
         private Vector2 _lastMouseInBackBuffer = new Vector2(-1, -1);
@@ -79,8 +76,7 @@ namespace Client.Main.Controls
 
         public override async Task Load()
         {
-            EnsureSingleCursorObject();
-            _cursorIntegrityCheckTimeMs = 0f;
+            Objects.Add(_cursor = new CursorObject());
             await base.Load();
         }
 
@@ -88,13 +84,6 @@ namespace Client.Main.Controls
         {
             if (Status != GameControlStatus.Ready || !Visible)
                 return;
-
-            _cursorIntegrityCheckTimeMs -= (float)time.ElapsedGameTime.TotalMilliseconds;
-            if (_cursorIntegrityCheckTimeMs <= 0f)
-            {
-                EnsureSingleCursorObject();
-                _cursorIntegrityCheckTimeMs = 1000f;
-            }
 
             HeroTile = World.Terrain.GetHeroTile(Walker.Position.X, Walker.Position.Y);
 
@@ -146,12 +135,6 @@ namespace Client.Main.Controls
                 _cursorNextMoveTime = 250f;
                 var newTile = new Vector2(MouseTileX, MouseTileY);
 
-                // Prevent duplicate move marker placement while the mouse is held on the same tile.
-                int targetX = (int)newTile.X;
-                int targetY = (int)newTile.Y;
-                if (targetX == _lastMoveTargetX && targetY == _lastMoveTargetY)
-                    return;
-
                 if (!IsWalkable(newTile))
                     return;
 
@@ -164,21 +147,10 @@ namespace Client.Main.Controls
                 float height = Terrain.RequestTerrainHeight(worldX, worldY) + ExtraHeight;
                 _cursor.Position = new Vector3(worldX, worldY, height) + new Vector3(50f, 40f, 0);
                 Walker.MoveTo(newTile);
-                _lastMoveTargetX = targetX;
-                _lastMoveTargetY = targetY;
-
-                if (Scene is Client.Main.Scenes.BaseScene baseScene)
-                    baseScene.SetMouseInputConsumed();
             }
             else if (_cursorNextMoveTime > 0f)
             {
                 _cursorNextMoveTime -= (float)time.ElapsedGameTime.TotalMilliseconds;
-            }
-
-            if (MuGame.Instance.Mouse.LeftButton == ButtonState.Released)
-            {
-                _lastMoveTargetX = -1;
-                _lastMoveTargetY = -1;
             }
 
             var mouseState = MuGame.Instance.Mouse;
@@ -195,40 +167,6 @@ namespace Client.Main.Controls
             _previousScrollValue = currentScroll;
 
             base.Update(time);
-        }
-
-        private void EnsureSingleCursorObject()
-        {
-            CursorObject primaryCursor = null;
-
-            for (int i = Objects.Count - 1; i >= 0; i--)
-            {
-                if (Objects[i] is not CursorObject cursorObj)
-                    continue;
-
-                if (primaryCursor == null)
-                {
-                    primaryCursor = cursorObj;
-                    continue;
-                }
-
-                Objects.Remove(cursorObj);
-                if (cursorObj.Status != GameControlStatus.Disposed)
-                    cursorObj.Dispose();
-            }
-
-            if (primaryCursor == null)
-            {
-                if (_cursor == null || _cursor.Status == GameControlStatus.Disposed)
-                    _cursor = new CursorObject();
-
-                if (!Objects.Contains(_cursor))
-                    Objects.Add(_cursor);
-
-                primaryCursor = _cursor;
-            }
-
-            _cursor = primaryCursor;
         }
 
         // --- Helper Methods ---
