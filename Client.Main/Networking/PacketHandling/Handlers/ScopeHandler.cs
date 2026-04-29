@@ -1855,6 +1855,9 @@ namespace Client.Main.Networking.PacketHandling.Handlers
                         if (objToMove != null)
                         {
                             objToMove.Location = new Vector2(x, y);
+                            // Instant move only (walk uses ObjectWalked); snap kinematics like respawn so we do not
+                            // interpolate from stale MoveTarget with idle locomotion clips.
+                            objToMove.SyncKinematicsAfterInstantMove();
                             _logger.LogDebug("Updated visual position for {Type} {Id:X4}", objToMove.GetType().Name, maskedId);
                         }
                     }

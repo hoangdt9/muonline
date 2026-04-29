@@ -302,10 +302,9 @@ namespace Client.Main.Scenes
                 var charState = MuGame.Network?.GetCharacterState();
                 if (charState == null)
                 {
-                    UpdateLoadProgress("Error: CharacterState is null.", 1.0f);
-                    _logger?.LogDebug("CharacterState is null in GameScene.Load, cannot proceed.");
+                    _logger?.LogError("CharacterState is null in GameScene.Load — cannot enter game.");
                     _modernHud.Visible = false;
-                    return;
+                    throw new InvalidOperationException("CharacterState is null; cannot load GameScene.");
                 }
 
                 _hero.CharacterClass = _characterInfo.Class;
@@ -375,6 +374,15 @@ namespace Client.Main.Scenes
                 _logger?.LogDebug($"GameScene.LoadSceneContentWithProgress: Added _hero to World.Objects.");
 
                 await worldInstance.Initialize();
+                if (worldInstance.Status != GameControlStatus.Ready)
+                {
+                    _logger?.LogError(
+                        "World {WorldType} Initialize finished with Status={Status} (exceptions are swallowed inside GameControl.Initialize).",
+                        initialWorldType.Name, worldInstance.Status);
+                    throw new InvalidOperationException(
+                        $"World '{initialWorldType.Name}' failed to initialize (status {worldInstance.Status}).");
+                }
+
                 UpdateLoadProgress($"World {initialWorldType.Name} initialized.", 0.6f);
 
                 if (worldInstance is WalkableWorldControl walkableAfterInit)
@@ -396,6 +404,11 @@ namespace Client.Main.Scenes
 
                     _logger?.LogDebug($"GameScene.LoadSceneContentWithProgress: _hero.NetworkId after Load(): {_hero.NetworkId:X4}");
                     _scopeImportController?.EnsureHeroNetworkId(expectedNetworkId, "after hero Load()");
+                    if (_hero.Status != GameControlStatus.Ready)
+                    {
+                        _logger?.LogError("Hero Load finished with Status={Status}", _hero.Status);
+                        throw new InvalidOperationException($"Hero asset load failed (status {_hero.Status}).");
+                    }
                 }
                 UpdateLoadProgress("Hero assets loaded.", 0.80f);
 
@@ -438,17 +451,21 @@ namespace Client.Main.Scenes
                 }
 
                 // Finalize
-                _mapController?.UpdateLoadProgress("Game ready!", 1.0f);
+                UpdateLoadProgress("Game ready!", 1.0f);
                 _modernHud.Visible = true;
                 _mapController?.UpdateMapName();
             }
             finally
             {
-                _mapController?.DisposeLoadingScreen();
-                if (_progressBar != null)
+                // Must run on the main thread after queued progress callbacks; avoids tearing down LoadingScreen
+                // from a threadpool continuation (race with Draw) and avoids "Loading... 0%" when Progress bar
+                // reads null LoadingScreen while World is still not Ready.
+                MuGame.ScheduleOnMainThread(() =>
                 {
-                    _progressBar.Visible = false;
-                }
+                    _mapController?.DisposeLoadingScreen();
+                    if (_progressBar != null)
+                        _progressBar.Visible = false;
+                });
             }
         }
 

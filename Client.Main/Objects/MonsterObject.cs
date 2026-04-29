@@ -63,7 +63,7 @@ namespace Client.Main.Objects
         public MonsterObject() : base()
         {
             Interactive = true;
-            AnimationSpeed = 6f;
+            AnimationSpeed = 25f;
         }
 
         public void StartDeathFade(float duration = 3.5f)

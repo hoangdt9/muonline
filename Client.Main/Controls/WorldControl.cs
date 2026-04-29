@@ -185,6 +185,8 @@ namespace Client.Main.Controls
         private readonly List<WorldObject> _visibleObjects = [];
         private readonly HashSet<WorldObject> _visibleObjectSet = [];
         private readonly HashSet<WorldObject> _positionDirtyObjects = [];
+        /// <summary>Serializes access to <see cref="_positionDirtyObjects"/> — adds may occur from async load threads while Update clears/copies on the main thread.</summary>
+        private readonly object _positionDirtyObjectsLock = new();
         private readonly object _visibleMergeLock = new();
         private bool _dirtyVisibleObjects = true;
         private bool _hasVisibilitySnapshot;
@@ -285,7 +287,8 @@ namespace Client.Main.Controls
                     if (!ReferenceEquals(obj.World, world))
                         return;
 
-                    world._positionDirtyObjects.Add(obj);
+                    lock (world._positionDirtyObjectsLock)
+                        world._positionDirtyObjects.Add(obj);
                     world.UpdateSpatialRegistration(obj);
                 }
                 else
@@ -373,7 +376,11 @@ namespace Client.Main.Controls
 
             // Keep update list current for object movement, but defer full camera recull to end of update
             // so rendering uses the latest camera state from this frame.
-            if (_positionDirtyObjects.Count > 0 && !_dirtyVisibleObjects)
+            bool positionDirty;
+            lock (_positionDirtyObjectsLock)
+                positionDirty = _positionDirtyObjects.Count > 0;
+
+            if (positionDirty && !_dirtyVisibleObjects)
             {
                 RefreshDirtyVisibleObjects();
             }
@@ -393,9 +400,12 @@ namespace Client.Main.Controls
                 _dirtyVisibleObjects = false;
                 _lastCulledCameraVersion = cameraVersion;
             }
-            else if (_positionDirtyObjects.Count > 0)
+            else
             {
-                RefreshDirtyVisibleObjects();
+                lock (_positionDirtyObjectsLock)
+                    positionDirty = _positionDirtyObjects.Count > 0;
+                if (positionDirty)
+                    RefreshDirtyVisibleObjects();
             }
         }
 
@@ -504,7 +514,8 @@ namespace Client.Main.Controls
             }
 
             RegisterSpatialObject(e.Control);
-            _positionDirtyObjects.Add(e.Control);
+            lock (_positionDirtyObjectsLock)
+                _positionDirtyObjects.Add(e.Control);
             if (e.Control.Status == GameControlStatus.NonInitialized)
                 _objectsToInitialize.Enqueue(e.Control);
         }
@@ -523,7 +534,10 @@ namespace Client.Main.Controls
                 if (obj.Hidden)
                     world.RemoveVisibleObject(obj);
                 else
-                    world._positionDirtyObjects.Add(obj);
+                {
+                    lock (world._positionDirtyObjectsLock)
+                        world._positionDirtyObjects.Add(obj);
+                }
             });
         }
 
@@ -553,7 +567,8 @@ namespace Client.Main.Controls
             e.Control.PositionChanged -= Object_PositionChanged;
 
             RemoveVisibleObject(e.Control);
-            _positionDirtyObjects.Remove(e.Control);
+            lock (_positionDirtyObjectsLock)
+                _positionDirtyObjects.Remove(e.Control);
             UnregisterSpatialObject(e.Control);
         }
 
@@ -1168,7 +1183,8 @@ namespace Client.Main.Controls
             _cullingStopwatch.Restart();
             _visibleObjects.Clear();
             _visibleObjectSet.Clear();
-            _positionDirtyObjects.Clear();
+            lock (_positionDirtyObjectsLock)
+                _positionDirtyObjects.Clear();
 
             var camera = Camera.Instance;
             var camPos = camera.Position;
@@ -1246,8 +1262,16 @@ namespace Client.Main.Controls
 
         private void RefreshDirtyVisibleObjects()
         {
-            if (_positionDirtyObjects.Count == 0)
-                return;
+            WorldObject[] dirtySnapshot;
+            lock (_positionDirtyObjectsLock)
+            {
+                if (_positionDirtyObjects.Count == 0)
+                    return;
+
+                dirtySnapshot = new WorldObject[_positionDirtyObjects.Count];
+                _positionDirtyObjects.CopyTo(dirtySnapshot);
+                _positionDirtyObjects.Clear();
+            }
 
             var camera = Camera.Instance;
             var camPos = camera.Position;
@@ -1255,9 +1279,6 @@ namespace Client.Main.Controls
             float maxViewDistance = camera.ViewFar + Constants.MAX_CAMERA_DISTANCE + 250f;
             float maxDistSq = maxViewDistance * maxViewDistance;
             var frustum = camera.Frustum;
-            var dirtySnapshot = new WorldObject[_positionDirtyObjects.Count];
-            _positionDirtyObjects.CopyTo(dirtySnapshot);
-            _positionDirtyObjects.Clear();
 
             for (int i = 0; i < dirtySnapshot.Length; i++)
                 UpdateSpatialRegistration(dirtySnapshot[i]);
@@ -1435,7 +1456,8 @@ namespace Client.Main.Controls
             _monsters.Clear();
             _droppedItems.Clear();
             _visibleObjectSet.Clear();
-            _positionDirtyObjects.Clear();
+            lock (_positionDirtyObjectsLock)
+                _positionDirtyObjects.Clear();
             _spatialObjectSectors.Clear();
             _spatialOffGridObjects.Clear();
             _spatialCandidates.Clear();
@@ -1465,7 +1487,8 @@ namespace Client.Main.Controls
 
             if (worldObject.Status == GameControlStatus.Ready)
             {
-                _positionDirtyObjects.Add(worldObject);
+                lock (_positionDirtyObjectsLock)
+                    _positionDirtyObjects.Add(worldObject);
                 UpdateSpatialRegistration(worldObject);
                 return;
             }
@@ -1473,7 +1496,8 @@ namespace Client.Main.Controls
             if (worldObject.Status == GameControlStatus.Disposed || worldObject.Status == GameControlStatus.Error)
             {
                 RemoveVisibleObject(worldObject);
-                _positionDirtyObjects.Remove(worldObject);
+                lock (_positionDirtyObjectsLock)
+                    _positionDirtyObjects.Remove(worldObject);
                 UnregisterSpatialObject(worldObject);
             }
         }

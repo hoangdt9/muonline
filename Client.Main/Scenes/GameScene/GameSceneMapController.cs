@@ -84,16 +84,16 @@ namespace Client.Main.Scenes
             }
         }
 
+        /// <summary>
+        /// Updates loading chrome — callers must marshal to the main thread (<see cref="MuGame.ScheduleOnMainThread"/>).
+        /// </summary>
         public void UpdateLoadProgress(string message, float progress)
         {
-            MuGame.ScheduleOnMainThread(() =>
-            {
-                if (_loadingScreen == null)
-                    return;
+            if (_loadingScreen == null)
+                return;
 
-                _loadingScreen.Message = message;
-                _loadingScreen.Progress = progress;
-            });
+            _loadingScreen.Message = message;
+            _loadingScreen.Progress = progress;
         }
 
         public void UpdateLoading(GameTime gameTime)

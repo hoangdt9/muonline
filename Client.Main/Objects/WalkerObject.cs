@@ -180,6 +180,20 @@ namespace Client.Main.Objects
             _targetAngle = Angle;
         }
 
+        /// <summary>
+        /// Call after <see cref="Location"/> was set from server instant move (packet 0x15 ObjectMoved).
+        /// Aligns MoveTarget/Position with terrain target so <see cref="IsMoving"/> and locomotion animations
+        /// stay consistent (same idea as <see cref="Networking.NetworkManager.ProcessCharacterRespawn"/>).
+        /// </summary>
+        public void SyncKinematicsAfterInstantMove()
+        {
+            _currentPath?.Clear();
+            _currentPath = null;
+            _movementIntent = false;
+            MoveTargetPosition = TargetPosition;
+            Position = TargetPosition;
+        }
+
         public void OnDirectionChanged()
         {
             if (World is WalkableWorldControl)
@@ -248,6 +262,36 @@ namespace Client.Main.Objects
         /// </summary>
         protected virtual void BeforeWalkerSkeletalAnimation(GameTime gameTime)
         {
+            ApplyStrideAnimationSpeedForNonPlayerWalkers();
+        }
+
+        /// <summary>
+        /// Matches limb cycle rate to <see cref="MoveSpeed"/> for monsters/NPCs (players use <see cref="PlayerObject"/> stride logic).
+        /// Default ctor speeds (e.g. 6) were far below movement speed and caused universal ice-skating.
+        /// </summary>
+        private void ApplyStrideAnimationSpeedForNonPlayerWalkers()
+        {
+            if (this is PlayerObject)
+                return;
+
+            if (World is not WalkableWorldControl)
+                return;
+
+            if (!IsMoving || IsOneShotPlaying || Model?.Actions == null)
+                return;
+
+            int idx = CurrentAction;
+            if (idx < 0 || idx >= Model.Actions.Length)
+                return;
+
+            var actionData = Model.Actions[idx];
+            if (actionData == null)
+                return;
+
+            int tf = Math.Max(actionData.LockPositions ? actionData.NumAnimationKeys - 1 : actionData.NumAnimationKeys, 1);
+            float ps = actionData.PlaySpeed == 0 ? 1f : actionData.PlaySpeed;
+            float animSpeed = tf * MoveSpeed / (Constants.TERRAIN_SCALE * Math.Max(ps, 1e-4f));
+            AnimationSpeed = MathHelper.Clamp(animSpeed, 10f, 130f);
         }
 
         /// <summary>

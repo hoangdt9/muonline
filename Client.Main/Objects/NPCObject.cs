@@ -57,7 +57,7 @@ namespace Client.Main.Objects
         {
             _logger = AppLoggerFactory?.CreateLogger(GetType());
             Interactive = true;
-            AnimationSpeed = 6f;
+            AnimationSpeed = 25f;
 
             // Initialize body part objects and link their animations to this parent object
             HelmMask = new PlayerMaskHelmObject { LinkParentAnimation = true, Hidden = true };

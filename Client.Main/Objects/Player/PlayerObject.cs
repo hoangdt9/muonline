@@ -87,10 +87,6 @@ namespace Client.Main.Objects.Player
         // Timer for footstep sound playback
         private float _footstepTimer;
 
-#if DEBUG
-        private double _movementAnimDiagLastSeconds = double.NegativeInfinity;
-#endif
-
         // Movement speed/run state (mirrors SourceMain 5.2 behavior)
         private float _runFrames;
         private const float RunActivationFrames = 40f;
@@ -146,9 +142,6 @@ namespace Client.Main.Objects.Player
 
         private readonly CharacterService _characterService;
         private readonly NetworkManager _networkManager;
-
-        /// <summary>Stable category for <see cref="TryMovementPipelineDiag"/> — avoids ctor-time null AppLoggerFactory / HeroObject type mismatch.</summary>
-        private static Microsoft.Extensions.Logging.ILogger _movementDiagLogger;
 
         public PlayerEquipment Equipment { get; } = new PlayerEquipment();
 
@@ -1943,8 +1936,29 @@ namespace Client.Main.Objects.Player
         }
 
         /// <summary>
-        /// Align walk/run animation cycle rate with <see cref="WalkerObject.MoveSpeed"/> so leg motion matches tile translation (reduces ice-skating).
-        /// Uses one full BMD cycle per cardinal tile step (~<see cref="Constants.TERRAIN_SCALE"/> world units).
+        /// Align walk/run/fly/swim animation cycle rate with <see cref="WalkerObject.MoveSpeed"/> so motion matches translation (reduces ice-skating).
+        /// Uses approximately one BMD cycle per cardinal tile step (~<see cref="Constants.TERRAIN_SCALE"/> world units).
+        /// </summary>
+        private float ComputeStrideSyncedAnimationSpeed(PlayerAction refAction)
+        {
+            int idx = (int)refAction;
+            if (Model?.Actions == null || idx < 0 || idx >= Model.Actions.Length)
+                return DefaultStrideAnimationSpeed;
+
+            var action = Model.Actions[idx];
+            if (action == null)
+                return DefaultStrideAnimationSpeed;
+
+            int tf = Math.Max(action.LockPositions ? action.NumAnimationKeys - 1 : action.NumAnimationKeys, 1);
+            float ps = action.PlaySpeed == 0 ? 1f : action.PlaySpeed;
+
+            float tileUnits = Constants.TERRAIN_SCALE;
+            float animSpeed = tf * MoveSpeed / (tileUnits * Math.Max(ps, 1e-4f));
+            return MathHelper.Clamp(animSpeed, 14f, 88f);
+        }
+
+        /// <summary>
+        /// Align walk/run/fly/swim animation cycle rate with server-derived <see cref="WalkerObject.MoveSpeed"/>.
         /// </summary>
         private void ApplyGroundStrideAnimationSpeed(
             bool relaxedSafeZone,
@@ -1954,38 +1968,35 @@ namespace Client.Main.Objects.Player
             bool isInSafeZone,
             bool isRunning)
         {
-            if (!kinematicMoving || mode != MovementMode.Walk || _isRiding)
+            if (!kinematicMoving || _isRiding)
             {
                 AnimationSpeed = DefaultStrideAnimationSpeed;
                 return;
             }
 
-            PlayerAction refAction = relaxedSafeZone
+            if (mode == MovementMode.Fly)
+            {
+                PlayerAction refAction = weapons.PrimaryKind == WeaponKind.Crossbow
+                    ? PlayerAction.PlayerFlyCrossbow
+                    : PlayerAction.PlayerFly;
+                refAction = ResolvePlayableMovementAction(refAction, MovementMode.Fly);
+                AnimationSpeed = ComputeStrideSyncedAnimationSpeed(refAction);
+                return;
+            }
+
+            if (mode == MovementMode.Swim)
+            {
+                PlayerAction refAction = isRunning ? PlayerAction.PlayerRunSwim : PlayerAction.PlayerWalkSwim;
+                AnimationSpeed = ComputeStrideSyncedAnimationSpeed(refAction);
+                return;
+            }
+
+            PlayerAction refWalkAction = relaxedSafeZone
                 ? GetRelaxedWalkAction()
                 : GetMovementAction(MovementMode.Walk, weapons, isInSafeZone, isRunning);
 
-            refAction = ResolvePlayableMovementAction(refAction, MovementMode.Walk);
-
-            int idx = (int)refAction;
-            if (Model?.Actions == null || idx < 0 || idx >= Model.Actions.Length)
-            {
-                AnimationSpeed = DefaultStrideAnimationSpeed;
-                return;
-            }
-
-            var action = Model.Actions[idx];
-            if (action == null)
-            {
-                AnimationSpeed = DefaultStrideAnimationSpeed;
-                return;
-            }
-
-            int tf = Math.Max(action.LockPositions ? action.NumAnimationKeys - 1 : action.NumAnimationKeys, 1);
-            float ps = action.PlaySpeed == 0 ? 1f : action.PlaySpeed;
-
-            float tileUnits = Constants.TERRAIN_SCALE;
-            float animSpeed = tf * MoveSpeed / (tileUnits * Math.Max(ps, 1e-4f));
-            AnimationSpeed = MathHelper.Clamp(animSpeed, 14f, 88f);
+            refWalkAction = ResolvePlayableMovementAction(refWalkAction, MovementMode.Walk);
+            AnimationSpeed = ComputeStrideSyncedAnimationSpeed(refWalkAction);
         }
 
         private static bool IsTwoHandedWeaponKind(WeaponKind kind) =>
@@ -2925,9 +2936,6 @@ namespace Client.Main.Objects.Player
 
             ApplyGroundStrideAnimationSpeed(relaxedSafeZone, kinematicMoving, mode, weapons, isInSafeZone, isRunning);
 
-            PlayerAction? diagPreResolve = null;
-            PlayerAction? diagPostResolve = null;
-
             if (isAboutToMove)
             {
                 ResetRestSitStates();
@@ -2949,9 +2957,7 @@ namespace Client.Main.Objects.Player
                     desired = GetMovementAction(mode, weapons, isInSafeZone, isRunning);
                 }
 
-                diagPreResolve = desired;
                 desired = ResolvePlayableMovementAction(desired, mode);
-                diagPostResolve = desired;
 
                 if (!IsOneShotPlaying && CurrentAction != desired)
                     PlayAction((ushort)desired);
@@ -2985,91 +2991,6 @@ namespace Client.Main.Objects.Player
                 if (CurrentAction != idleAction)
                     PlayAction((ushort)idleAction);
             }
-            TryMovementPipelineDiag(world, gameTime, flags, relaxedSafeZone, pathQueued, kinematicMoving, isAboutToMove, mode, isRunning,
-                diagPreResolve, diagPostResolve);
-        }
-
-        /// <summary>BMD effective frame count matching <see cref="ModelObject.Animation"/> (LockPositions adjusts length).</summary>
-        private int GetEffectiveTotalFrames(PlayerAction action)
-        {
-            int idx = (int)action;
-            if (Model?.Actions == null || idx < 0 || idx >= Model.Actions.Length || Model.Actions[idx] == null)
-                return -1;
-
-            var a = Model.Actions[idx];
-            return Math.Max(a.LockPositions ? a.NumAnimationKeys - 1 : a.NumAnimationKeys, 1);
-        }
-
-        /// <summary>
-        /// Throttled pipeline log: filter console for <c>[MovementPipe]</c>. Compare pre/post resolve when moving.
-        /// </summary>
-        private void TryMovementPipelineDiag(
-            WalkableWorldControl world,
-            GameTime gameTime,
-            TWFlags flags,
-            bool relaxedSafeZone,
-            bool pathQueued,
-            bool kinematicMoving,
-            bool isAboutToMove,
-            MovementMode mode,
-            bool isRunning,
-            PlayerAction? preResolveDesired,
-            PlayerAction? postResolveDesired)
-        {
-            if (!IsMainWalker)
-                return;
-
-            double now = gameTime.TotalGameTime.TotalSeconds;
-            if (now - _movementAnimDiagLastSeconds < 0.55)
-                return;
-            _movementAnimDiagLastSeconds = now;
-
-            int curIdx = (int)CurrentAction;
-            int curKeys = -1;
-            bool lockPos = false;
-            if (Model?.Actions != null && curIdx >= 0 && curIdx < Model.Actions.Length && Model.Actions[curIdx] != null)
-            {
-                var act = Model.Actions[curIdx];
-                curKeys = act.NumAnimationKeys;
-                lockPos = act.LockPositions;
-            }
-
-            int effCur = GetEffectiveTotalFrames((PlayerAction)CurrentAction);
-            bool hasAnimCur = HasAnimatedAction((PlayerAction)CurrentAction);
-            bool hasAnimPre = preResolveDesired.HasValue && HasAnimatedAction(preResolveDesired.Value);
-
-            _movementDiagLogger ??= MuGame.AppLoggerFactory?.CreateLogger("MuOnline.MovementDiag");
-            _movementDiagLogger?.LogInformation(
-                "[MovementPipe] cur={Cur} idx={Cidx} keys={Ckeys} effFrames={Eff} lock={Lock} frame={Frame} animT={AnimT} hasAnimCur={HaCur} spd={Spd} " +
-                "pre={Pre} post={Post} hasAnimPre={HaPre} mode={Mode} ride={Ride} vehHidden={VehHid} kin={Kin} about={About} move={Move} intent={Intent} path={Path} run={Run} " +
-                "map={Map} tile=({Tx},{Ty}) safe={Safe} relaxSZ={Relax} wings={Wings}",
-                (PlayerAction)CurrentAction,
-                curIdx,
-                curKeys,
-                effCur,
-                lockPos,
-                CurrentFrame,
-                _animTime,
-                hasAnimCur,
-                AnimationSpeed,
-                preResolveDesired?.ToString() ?? "(idle-branch)",
-                postResolveDesired?.ToString() ?? "(idle-branch)",
-                hasAnimPre,
-                mode,
-                _isRiding,
-                Vehicle?.Hidden ?? true,
-                kinematicMoving,
-                isAboutToMove,
-                IsMoving,
-                MovementIntent,
-                _currentPath?.Count ?? 0,
-                isRunning,
-                world.WorldIndex,
-                (int)Location.X,
-                (int)Location.Y,
-                flags.HasFlag(TWFlags.SafeZone),
-                relaxedSafeZone,
-                HasEquippedWings);
         }
 
         // --------------- REMOTE PLAYERS ----------------
