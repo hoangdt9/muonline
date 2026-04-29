@@ -2366,7 +2366,7 @@ namespace Client.Main.Networking.PacketHandling.Handlers
                         obj.RawId,
                         obj.NetworkId);
                     tcs.TrySetResult(true);
-                }, Controllers.TaskScheduler.Priority.Low);
+                }, Controllers.TaskScheduler.Priority.Normal);
 
                 if (!enqueued)
                 {

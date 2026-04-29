@@ -70,6 +70,12 @@ namespace Client.Main.Objects
                 }
             }
 
+            // LockPositions can collapse a multi-key walk/fly/mount row to one effective frame while the row still
+            // defines interpolation pairs — Animation would freeze bones while the walker root moves (ice skating).
+            // Expand back to a looping clip when the raw row still has multiple keys (death clamp paths unchanged).
+            if (this is WalkerObject && !isDeathAction && action.NumAnimationKeys >= 2 && totalFrames == 1)
+                totalFrames = Math.Max(2, action.NumAnimationKeys);
+
             if (totalFrames == 1 && !ContinuousAnimation)
             {
 #if DEBUG

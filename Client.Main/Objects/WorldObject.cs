@@ -141,7 +141,19 @@ namespace Client.Main.Objects
         private void OnStatusChanged()
         {
             StatusChanged?.Invoke(this, EventArgs.Empty);
-            World?.OnWorldObjectStatusChanged(this);
+            // World tracking touches non-thread-safe collections; hero Load() can finish off the main thread.
+            if (World != null)
+            {
+                WorldControl world = World;
+                WorldObject self = this;
+                MuGame.ScheduleOnMainThread(() =>
+                {
+                    if (!ReferenceEquals(self.World, world))
+                        return;
+
+                    world.OnWorldObjectStatusChanged(self);
+                });
+            }
         }
 
         private void OnHiddenChanged()

@@ -277,33 +277,20 @@ namespace Client.Main.Controls
 
         private void Object_PositionChanged(object sender, EventArgs e)
         {
-            if (sender is WorldObject obj)
+            var world = this;
+            MuGame.ScheduleOnMainThread(() =>
             {
-                _positionDirtyObjects.Add(obj);
-                UpdateSpatialRegistration(obj);
-            }
-            else
-                _dirtyVisibleObjects = true;
-        }
+                if (sender is WorldObject obj)
+                {
+                    if (!ReferenceEquals(obj.World, world))
+                        return;
 
-        private void Object_StatusChanged(object sender, EventArgs e)
-        {
-            if (sender is not WorldObject obj)
-                return;
-
-            if (obj.Status == GameControlStatus.Ready)
-            {
-                _positionDirtyObjects.Add(obj);
-                UpdateSpatialRegistration(obj);
-                return;
-            }
-
-            if (obj.Status == GameControlStatus.Disposed || obj.Status == GameControlStatus.Error)
-            {
-                RemoveVisibleObject(obj);
-                _positionDirtyObjects.Remove(obj);
-                UnregisterSpatialObject(obj);
-            }
+                    world._positionDirtyObjects.Add(obj);
+                    world.UpdateSpatialRegistration(obj);
+                }
+                else
+                    world._dirtyVisibleObjects = true;
+            });
         }
 
         // --- Lifecycle Methods ---
@@ -419,7 +406,7 @@ namespace Client.Main.Controls
 
             bool queued = MuGame.TaskScheduler?.QueueTask(
                 () => LoadInitializedObjectAsync(obj),
-                Controllers.TaskScheduler.Priority.Low) == true;
+                Controllers.TaskScheduler.Priority.Normal) == true;
 
             if (!queued)
             {
@@ -498,7 +485,6 @@ namespace Client.Main.Controls
             e.Control.World = this;
             e.Control.HiddenChanged += Object_HiddenChanged;
             e.Control.PositionChanged += Object_PositionChanged;
-            e.Control.StatusChanged += Object_StatusChanged;
 
             TrackObjectType(e.Control);
             if (e.Control is WalkerObject walker &&
@@ -525,14 +511,20 @@ namespace Client.Main.Controls
 
         private void Object_HiddenChanged(object sender, EventArgs e)
         {
-            var obj = sender as WorldObject;
-            if (obj == null)
-                return;
+            var world = this;
+            MuGame.ScheduleOnMainThread(() =>
+            {
+                var obj = sender as WorldObject;
+                if (obj == null)
+                    return;
+                if (!ReferenceEquals(obj.World, world))
+                    return;
 
-            if (obj.Hidden)
-                RemoveVisibleObject(obj);
-            else
-                _positionDirtyObjects.Add(obj);
+                if (obj.Hidden)
+                    world.RemoveVisibleObject(obj);
+                else
+                    world._positionDirtyObjects.Add(obj);
+            });
         }
 
         private void OnObjectRemoved(object sender, ChildrenEventArgs<WorldObject> e)
@@ -559,7 +551,6 @@ namespace Client.Main.Controls
 
             e.Control.HiddenChanged -= Object_HiddenChanged;
             e.Control.PositionChanged -= Object_PositionChanged;
-            e.Control.StatusChanged -= Object_StatusChanged;
 
             RemoveVisibleObject(e.Control);
             _positionDirtyObjects.Remove(e.Control);

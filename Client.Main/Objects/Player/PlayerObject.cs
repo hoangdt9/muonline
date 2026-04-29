@@ -1509,10 +1509,53 @@ namespace Client.Main.Objects.Player
         public PlayerAction GetSkillAction(ushort skillId, bool isInSafeZone)
         {
             int animationId = SkillDatabase.GetSkillAnimation(skillId);
-            if (animationId > 0 && Model?.Actions != null && animationId < Model.Actions.Length && Model.Actions[animationId] != null)
+            if (animationId <= 0)
+                return GetDefaultSkillAction(isInSafeZone);
+
+            animationId = ResolveSkillAnimationForPlayback(skillId, animationId);
+
+            if (Model?.Actions != null && animationId < Model.Actions.Length && Model.Actions[animationId] != null)
                 return (PlayerAction)animationId;
 
             return GetDefaultSkillAction(isInSafeZone);
+        }
+
+        /// <summary>
+        /// Remaps raw skill animation IDs from <see cref="SkillDatabase"/> for mount and weapon layout
+        /// (e.g. Rageful Blow ground FuryStrike on Fenrir → Fenrir skill row).
+        /// </summary>
+        public int ResolveSkillAnimationForPlayback(ushort skillId, int animationId)
+        {
+            if (animationId <= 0)
+                return animationId;
+
+            if (!_isRiding || Vehicle?.Hidden == true)
+                return animationId;
+
+            if (!IsFenrirVehicle(_currentVehicleIndex))
+                return animationId;
+
+            var weapons = GetWeaponContext();
+
+            // Skill 42 — Rageful Blow: DB uses ground FuryStrike (66); on Fenrir use fenrir skill motions.
+            if (skillId == 42 && animationId == (int)PlayerAction.PlayerAttackSkillFuryStrike)
+            {
+                if (weapons.HasDualWeapons && weapons.RightKind == WeaponKind.Sword && weapons.LeftKind == WeaponKind.Sword)
+                    return (int)PlayerAction.PlayerFenrirSkillTwoSword;
+
+                if (IsTwoHandedWeaponKind(weapons.PrimaryKind))
+                    return (int)PlayerAction.PlayerFenrirSkill;
+
+                if (weapons.HasRightWeapon && weapons.RightKind == WeaponKind.Sword && !weapons.HasLeftWeapon)
+                    return (int)PlayerAction.PlayerFenrirSkillOneRight;
+
+                if (weapons.HasLeftWeapon && weapons.LeftKind == WeaponKind.Sword && !weapons.HasRightWeapon)
+                    return (int)PlayerAction.PlayerFenrirSkillOneLeft;
+
+                return (int)PlayerAction.PlayerFenrirSkill;
+            }
+
+            return animationId;
         }
 
         private PlayerAction GetDefaultSkillAction(bool isInSafeZone)
@@ -2274,11 +2317,18 @@ namespace Client.Main.Objects.Player
         private bool HasAnimatedAction(PlayerAction action)
         {
             int idx = (int)action;
-            return Model?.Actions != null &&
-                   idx >= 0 &&
-                   idx < Model.Actions.Length &&
-                   Model.Actions[idx] != null &&
-                   Model.Actions[idx].NumAnimationKeys > 1;
+            if (Model?.Actions == null ||
+                idx < 0 ||
+                idx >= Model.Actions.Length ||
+                Model.Actions[idx] == null)
+                return false;
+
+            var a = Model.Actions[idx];
+            int effective = Math.Max(a.LockPositions ? a.NumAnimationKeys - 1 : a.NumAnimationKeys, 1);
+            if (effective <= 1 && a.NumAnimationKeys >= 2)
+                effective = Math.Max(2, a.NumAnimationKeys);
+
+            return effective > 1;
         }
 
         /// <summary>

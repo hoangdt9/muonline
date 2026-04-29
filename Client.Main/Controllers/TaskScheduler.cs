@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using System;
 using System.Diagnostics;
 using System.Threading.Tasks;
 
@@ -14,11 +15,14 @@ namespace Client.Main.Controllers
         private readonly ConcurrentPriorityQueue<TaskItem> _taskQueue;
         private readonly CancellationTokenSource _cts = new();
 
-        // Configuration
-        // Lower per-frame budget to smooth out spikes when many spawn/load tasks enqueue at once
-        private readonly int _maxTasksPerFrame = 4;
-        private readonly int _maxTotalQueuedTasks = 150;
-        private readonly TimeSpan _maxProcessingTimePerFrame = TimeSpan.FromMilliseconds(8); // tighter per-frame slice
+        // Configuration — spawn bursts (NPCs, drops, equipment) can enqueue hundreds of loads; a tiny queue drops
+        // tasks and causes visible glitches (models popping, sliding poses). Keep headroom + adaptive throughput.
+        private readonly int _maxTasksPerFrame = 8;
+        private readonly int _maxTotalQueuedTasks = 600;
+        private readonly TimeSpan _maxProcessingTimePerFrame = TimeSpan.FromMilliseconds(12);
+
+        private long _lastQueueFullLogTickMs;
+        private long _lastBacklogWarnTickMs;
 
         // Statistics
         private long _processedTasks;
@@ -77,8 +81,13 @@ namespace Client.Main.Controllers
 
             if (_taskQueue.Count >= _maxTotalQueuedTasks)
             {
-                _logger.LogWarning("Task queue is full ({Count}). Dropping task with priority {Priority}",
-                                  _taskQueue.Count, priority);
+                long now = Environment.TickCount64;
+                if (now - _lastQueueFullLogTickMs >= 2000)
+                {
+                    _lastQueueFullLogTickMs = now;
+                    _logger.LogWarning("Task queue is full ({Count}). Dropping task with priority {Priority}",
+                        _taskQueue.Count, priority);
+                }
                 return false;
             }
 
@@ -125,8 +134,8 @@ namespace Client.Main.Controllers
             // Increase throughput when queue is backing up, still capped by time budget.
             if (queuedAtStart > 40)
             {
-                int adaptiveCap = 12 * workScale;
-                maxTasksThisFrame = Math.Min(adaptiveCap, maxTasksThisFrame + (queuedAtStart / 25));
+                int adaptiveCap = Math.Min(48 * workScale, 12 + queuedAtStart / 8);
+                maxTasksThisFrame = Math.Min(adaptiveCap, maxTasksThisFrame + (queuedAtStart / 20));
             }
 
             while (processedThisFrame < maxTasksThisFrame)
@@ -168,9 +177,14 @@ namespace Client.Main.Controllers
             _lastFrameQueueAtStart = queuedAtStart;
             _lastFrameQueueRemaining = remaining;
             _lastFrameProcessingMs = _frameStopwatch.Elapsed.TotalMilliseconds;
-            if (remaining > 50) // Warn about buildup
+            if (remaining > 80)
             {
-                _logger.LogWarning("Task queue is backing up. Current count: {Count}", remaining);
+                long now = Environment.TickCount64;
+                if (now - _lastBacklogWarnTickMs >= 2000)
+                {
+                    _lastBacklogWarnTickMs = now;
+                    _logger.LogWarning("Task queue is backing up. Current count: {Count}", remaining);
+                }
             }
         }
 

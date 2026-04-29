@@ -1243,6 +1243,7 @@ namespace Client.Main.Networking.PacketHandling.Handlers
 
                         if (animationId > 0)
                         {
+                            animationId = activeScene.Hero.ResolveSkillAnimationForPlayback(skillId, animationId);
                             activeScene.Hero.PlayAction((ushort)animationId);
                             _logger.LogInformation(
                                 "Playing targeted skill animation {AnimationId} for skill {SkillId} ({SkillName}) on target {TargetId}",
@@ -1354,6 +1355,7 @@ namespace Client.Main.Networking.PacketHandling.Handlers
 
                         if (animationId > 0)
                         {
+                            animationId = activeScene.Hero.ResolveSkillAnimationForPlayback(skillId, animationId);
                             activeScene.Hero.PlayAction((ushort)animationId);
                             _logger.LogInformation("Playing skill animation {AnimationId} for skill {SkillId} ({SkillName})",
                                 animationId, skillId, Core.Utilities.SkillDatabase.GetSkillName(skillId));
