@@ -187,8 +187,11 @@ namespace Client.Main.Objects
 
             // Create animation state for comparison - only for animated objects
             LocalAnimationState currentAnimState = default;
-            bool shouldCheckCache = !LinkParentAnimation && ParentBoneLink < 0 &&
-                                   action.NumAnimationKeys > 1; // Only cache animated objects
+            // Never use pose-equality skip for walkers flagged per-frame (main player, WalkerObject base):
+            // skipping bone rebuild while root motion continues causes visible "gliding".
+            bool shouldCheckCache = !RequiresPerFrameAnimation &&
+                                   !LinkParentAnimation && ParentBoneLink < 0 &&
+                                   action.NumAnimationKeys > 1;
 
             if (shouldCheckCache)
             {
