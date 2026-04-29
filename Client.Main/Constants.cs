@@ -236,6 +236,7 @@ namespace Client.Main
             SHADOW_BIAS = 0.005f;
             SHADOW_NORMAL_BIAS = 0.008f;
 
+            // Overridden in MuGame.Initialize from appsettings (GameDataPathResolver); avoids per-build ./Data when unset.
             DataPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data");
         }
 

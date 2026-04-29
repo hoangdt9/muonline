@@ -547,13 +547,17 @@ namespace Client.Main.Networking
             }
             await _connectionManager.DisconnectAsync();
 
-            _logger.LogInformation("Connecting to Game Server {Host}:{Port}...", host, port);
+            var connectHost = NormalizeGameServerHost(host);
+            if (!string.Equals(connectHost, host, StringComparison.Ordinal))
+                _logger.LogInformation("Normalized game server host {Original} -> {Normalized} (OpenMU loopback alias)", host, connectHost);
+
+            _logger.LogInformation("Connecting to Game Server {Host}:{Port}...", connectHost, port);
             UpdateState(ClientConnectionState.ConnectingToGameServer);
             _packetRouter.SetRoutingMode(false);
 
-            if (await _connectionManager.ConnectAsync(host, (ushort)port, true, _managerCts.Token))
+            if (await _connectionManager.ConnectAsync(connectHost, (ushort)port, true, _managerCts.Token))
             {
-                _currentHost = host;
+                _currentHost = connectHost;
                 _currentPort = port;
 
                 var gsConnection = _connectionManager.Connection;
@@ -563,7 +567,7 @@ namespace Client.Main.Networking
             }
             else
             {
-                OnErrorOccurred($"Connection to Game Server {host}:{port} failed.");
+                OnErrorOccurred($"Connection to Game Server {connectHost}:{port} failed.");
                 UpdateState(ClientConnectionState.Disconnected);
             }
         }
@@ -995,6 +999,22 @@ namespace Client.Main.Networking
             var result = new byte[length];
             Array.Copy(bytes, result, Math.Min(bytes.Length, length));
             return result;
+        }
+
+        /// <summary>
+        /// OpenMU advertises <c>127.127.127.127</c> for local game servers (legacy MU clients avoided <c>127.0.0.1</c>).
+        /// This client uses localhost for reliable TCP on all platforms.
+        /// </summary>
+        private static string NormalizeGameServerHost(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+                return host ?? string.Empty;
+
+            var h = host.Trim();
+            if (string.Equals(h, "127.127.127.127", StringComparison.OrdinalIgnoreCase))
+                return "127.0.0.1";
+
+            return h;
         }
 
         // IAsyncDisposable Implementation

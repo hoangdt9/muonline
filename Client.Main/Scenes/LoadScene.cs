@@ -226,7 +226,10 @@ namespace Client.Main.Scenes
 
                 EnsureDirectoryExists(extractPath);
 
-                if (CheckAssetsExist(extractPath))
+                var assetsReady = CheckAssetsExist(extractPath);
+                Debug.WriteLine($"[LoadScene] DataPath={extractPath}, assetsReady={assetsReady}");
+
+                if (assetsReady)
                 {
                     UpdateProgress(p =>
                     {
@@ -792,10 +795,21 @@ namespace Client.Main.Scenes
                 Directory.CreateDirectory(path);
         }
 
+        /// <summary>
+        /// True when MU Full ZIP appears unpacked here (same checks run across launches — avoids redownload when using persistent GameDataDirectory).
+        /// </summary>
         private static bool CheckAssetsExist(string dataPath)
         {
             try
             {
+                if (!Directory.Exists(dataPath))
+                    return false;
+
+                // Same marker LoadScene uses immediately after (GateDataManager)
+                if (File.Exists(Path.Combine(dataPath, "Gate.bmd")))
+                    return true;
+
+                // Anything extracted besides an orphaned/in-progress Data.zip (partial download)
                 return Directory.EnumerateFileSystemEntries(dataPath)
                     .Any(e => !e.EndsWith("Data.zip", StringComparison.OrdinalIgnoreCase));
             }

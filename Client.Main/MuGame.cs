@@ -278,8 +278,8 @@ namespace Client.Main
 
         protected override void Initialize()
         {
-            var fullPath = Path.GetFullPath(Constants.SETTINGS_PATH);
-            ConfigDirectory = Path.GetDirectoryName(fullPath)!;
+            // Resolve config next to the executable, not the process working directory (dotnet run uses repo root).
+            ConfigDirectory = Path.GetFullPath(AppContext.BaseDirectory);
             AppConfiguration = new ConfigurationBuilder()
                 .SetBasePath(ConfigDirectory)
                 .AddJsonFile(Constants.SETTINGS_PATH, optional: false, reloadOnChange: true)
@@ -314,6 +314,21 @@ namespace Client.Main
                 return;
             }
             bootLogger.LogInformation("✅ Configuration loaded.");
+
+            try
+            {
+                Constants.DataPath = GameDataPathResolver.Resolve(AppSettings.GameDataDirectory);
+                Directory.CreateDirectory(Constants.DataPath);
+                bootLogger.LogInformation("✅ Game data directory: {DataPath}", Constants.DataPath);
+            }
+            catch (Exception ex)
+            {
+                bootLogger.LogCritical(ex, "❌ Could not resolve MuOnlineSettings.GameDataDirectory.");
+#if !IOS
+                Exit();
+#endif
+                return;
+            }
 
             // --- Initialize Network Manager ---
             // Needs CharacterState and ScopeManager - create basic instances for now
