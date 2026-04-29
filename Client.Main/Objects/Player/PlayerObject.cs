@@ -1,4 +1,4 @@
-﻿using Client.Main.Content;
+using Client.Main.Content;
 using Client.Main.Controls;
 using Client.Main.Data;
 using Client.Main.Models;
@@ -2076,11 +2076,8 @@ namespace Client.Main.Objects.Player
             if (world.WorldIndex == 11)
                 return MovementMode.Fly;
 
-            // On every other map we may fly whenever wings are equipped.
-            if (HasEquippedWings && !flags.HasFlag(TWFlags.SafeZone))
-            {
-                return MovementMode.Fly;
-            }
+            // Ground maps (Lorencia, Noria, Devias, …): movement is still tile walk/run even if wings are equipped.
+            // Using Fly animations here made the hero look like sliding/hovering while the server applied normal walk paths.
             return MovementMode.Walk;
         }
 
@@ -2558,7 +2555,8 @@ namespace Client.Main.Objects.Player
             if (_isRiding && Vehicle != null && !Vehicle.Hidden)
             {
                 bool isMoving = IsMoving || _currentPath?.Count > 0 || MovementIntent;
-                Vehicle.SetRiderAnimation(isMoving: isMoving, isUsingSkill: false);
+                bool fenrirWalkPhase = IsFenrirVehicle(_currentVehicleIndex) && isMoving && _runFrames < FenrirRunDelayFrames;
+                Vehicle.SetRiderAnimation(isMoving: isMoving, isUsingSkill: false, useWalkInsteadOfRun: fenrirWalkPhase);
             }
         }
 
@@ -2724,7 +2722,8 @@ namespace Client.Main.Objects.Player
                     // Use riding animation when mounted
                     desired = GetRidingMovementAction(weapons);
                     // Sync vehicle animation
-                    Vehicle?.SetRiderAnimation(isMoving: true);
+                    bool fenrirWalkPhase = IsFenrirVehicle(_currentVehicleIndex) && _runFrames < FenrirRunDelayFrames;
+                    Vehicle?.SetRiderAnimation(isMoving: true, isUsingSkill: false, useWalkInsteadOfRun: fenrirWalkPhase);
                 }
                 else
                 {
@@ -2803,7 +2802,8 @@ namespace Client.Main.Objects.Player
                     // Use riding animation when mounted
                     desired = GetRidingMovementAction(weapons);
                     // Sync vehicle animation
-                    Vehicle?.SetRiderAnimation(isMoving: true);
+                    bool fenrirWalkPhase = IsFenrirVehicle(_currentVehicleIndex) && _runFrames < FenrirRunDelayFrames;
+                    Vehicle?.SetRiderAnimation(isMoving: true, isUsingSkill: false, useWalkInsteadOfRun: fenrirWalkPhase);
                 }
                 else
                 {

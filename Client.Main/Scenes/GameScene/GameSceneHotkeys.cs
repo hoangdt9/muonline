@@ -9,12 +9,21 @@ using Client.Main.Controls.UI.Game.Character;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Client.Main.Core.Models;
-
-namespace Client.Main.Scenes
+using Client.Main.Core.Client;
+using Client.Main.Controls.UI.Game.Hud;
+using Client.Main.Controls.UI.Game.Skills;
+using System.Threading.Tasks;
 {
     internal sealed class GameSceneHotkeys
     {
         private static readonly Keys[] MoveCommandKeys = { Keys.Up, Keys.Down, Keys.Left, Keys.Right, Keys.Enter, Keys.Escape };
+
+        private static readonly Keys[] HudDigitKeys =
+        {
+            Keys.D1, Keys.D2, Keys.D3, Keys.D4, Keys.D5, Keys.D6, Keys.D7, Keys.D8, Keys.D9, Keys.D0
+        };
+
+        private static readonly int[] HudDigitSlotIndices = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
 
         private readonly GameScene _scene;
         private readonly PauseMenuControl _pauseMenu;
@@ -25,6 +34,9 @@ namespace Client.Main.Scenes
         private readonly ChatInputBoxControl _chatInput;
         private readonly ChatLogWindow _chatLog;
         private readonly GameSceneObjectEditorController _objectEditorController;
+        private readonly SkillSelectionPanel _skillSelectionPanel;
+        private readonly CharacterState _characterState;
+        private readonly HudHotbarStripControl _hudHotbar;
         private readonly ILogger _logger;
 
         private readonly HotkeySet _global;
@@ -40,6 +52,9 @@ namespace Client.Main.Scenes
             ChatInputBoxControl chatInput,
             ChatLogWindow chatLog,
             GameSceneObjectEditorController objectEditorController,
+            SkillSelectionPanel skillSelectionPanel,
+            CharacterState characterState,
+            HudHotbarStripControl hudHotbar,
             ILogger logger = null)
         {
             _scene = scene;
@@ -51,6 +66,9 @@ namespace Client.Main.Scenes
             _chatInput = chatInput;
             _chatLog = chatLog;
             _objectEditorController = objectEditorController;
+            _skillSelectionPanel = skillSelectionPanel;
+            _characterState = characterState;
+            _hudHotbar = hudHotbar;
             _logger = logger ?? NullLogger.Instance;
 
             _global = new HotkeySet(_logger, "GameScene.Global");
@@ -77,7 +95,8 @@ namespace Client.Main.Scenes
             bool isUiInputActive =
                 (_scene.FocusControl is TextFieldControl)
                 || (_scene.FocusControl == _moveCommandWindow && _moveCommandWindow.Visible)
-                || (_pauseMenu != null && _pauseMenu.Visible);
+                || (_pauseMenu != null && _pauseMenu.Visible)
+                || (_chatInput != null && _chatInput.Visible);
 
             var modifiers = GetModifiers(keyboard);
 
@@ -128,6 +147,12 @@ namespace Client.Main.Scenes
 
         private static bool WhenChatLogFrameVisible(HotkeyContext context) => context.ChatLog.IsFrameVisible;
 
+        private bool WhenSkillPanelVisibleForAssign(HotkeyContext context)
+            => !context.IsUiInputActive && _skillSelectionPanel.Visible;
+
+        private bool WhenInventoryVisibleForPotionBind(HotkeyContext context)
+            => !context.IsUiInputActive && _inventoryControl.Visible;
+
         private void RegisterGlobalHotkeys(HotkeySet hotkeys)
         {
             hotkeys.OnKeyPressed(
@@ -177,6 +202,88 @@ namespace Client.Main.Scenes
 
             // Space bar to pick up nearest item in range
             hotkeys.OnKeyPressed(Keys.Space, PickupNearestItem, when: WhenNotUiInput);
+
+            hotkeys.OnKeyPressed(Keys.K, ToggleSkillSelectionPanel, when: WhenNotUiInput);
+
+            for (int i = 0; i < HudDigitKeys.Length; i++)
+            {
+                Keys key = HudDigitKeys[i];
+                int slotIdx = HudDigitSlotIndices[i];
+                hotkeys.OnKeyPressed(key, ctx => ArmHudSkillSlot(ctx, slotIdx), when: WhenNotUiInput);
+                hotkeys.OnKeyPressed(
+                    key,
+                    HotkeyModifiers.Control,
+                    ctx => AssignHoveredSkillToHudSlot(ctx, slotIdx),
+                    when: WhenSkillPanelVisibleForAssign,
+                    stopPropagation: true,
+                    exactModifiers: true);
+            }
+
+            hotkeys.OnKeyPressed(Keys.Q, ctx => UsePotionSlot(ctx, 0), when: WhenNotUiInput);
+            hotkeys.OnKeyPressed(Keys.W, ctx => UsePotionSlot(ctx, 1), when: WhenNotUiInput);
+            hotkeys.OnKeyPressed(Keys.E, ctx => UsePotionSlot(ctx, 2), when: WhenNotUiInput);
+
+            hotkeys.OnKeyPressed(Keys.Q, HotkeyModifiers.Shift, ctx => BindPotionSlot(ctx, 0), when: WhenInventoryVisibleForPotionBind, exactModifiers: true);
+            hotkeys.OnKeyPressed(Keys.W, HotkeyModifiers.Shift, ctx => BindPotionSlot(ctx, 1), when: WhenInventoryVisibleForPotionBind, exactModifiers: true);
+            hotkeys.OnKeyPressed(Keys.E, HotkeyModifiers.Shift, ctx => BindPotionSlot(ctx, 2), when: WhenInventoryVisibleForPotionBind, exactModifiers: true);
+        }
+
+        private void ToggleSkillSelectionPanel(HotkeyContext context)
+        {
+            _hudHotbar.ToggleSkillSelectionPanel();
+        }
+
+        private void ArmHudSkillSlot(HotkeyContext context, int slotIdx)
+        {
+            _characterState.SetArmedHudHotkeySlotIndex(slotIdx);
+            _hudHotbar.RefreshFromState();
+        }
+
+        private void AssignHoveredSkillToHudSlot(HotkeyContext context, int slotIdx)
+        {
+            SkillEntryState? skill = _skillSelectionPanel.HoveredSkill;
+            if (skill == null)
+            {
+                return;
+            }
+
+            _characterState.SetHudSkillId(slotIdx, skill.SkillId);
+            _characterState.SetArmedHudHotkeySlotIndex(slotIdx);
+            _hudHotbar.RefreshFromState();
+        }
+
+        private void UsePotionSlot(HotkeyContext context, int qweIndex)
+        {
+            byte? slot = _characterState.GetHudPotionInventorySlot(qweIndex);
+            if (!slot.HasValue)
+            {
+                return;
+            }
+
+            var svc = MuGame.Network?.GetCharacterService();
+            if (svc == null)
+            {
+                return;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                await svc.SendConsumeItemRequestAsync(slot.Value).ConfigureAwait(false);
+                await Task.Delay(200).ConfigureAwait(false);
+                MuGame.ScheduleOnMainThread(() => _characterState.RaiseInventoryChanged());
+            });
+        }
+
+        private void BindPotionSlot(HotkeyContext context, int qweIndex)
+        {
+            byte? invSlot = _inventoryControl.TryGetHoveredConsumableInventorySlot();
+            if (!invSlot.HasValue)
+            {
+                return;
+            }
+
+            _characterState.SetHudPotionInventorySlot(qweIndex, invSlot.Value);
+            _hudHotbar.RefreshFromState();
         }
 
         private void TogglePauseMenu(HotkeyContext context)

@@ -160,6 +160,7 @@ public static class VehicleDatabase
                 RiderHeightOffset = 0f, // Fenrir variants - rider too low
                 // SourceMain5.2 (_define.h): FENRIR_STAND=0, WALK=1, RUN=2, ATTACK=3, ATTACK_SKILL=4, DAMAGE=5
                 IdleActionIndex = 0,
+                WalkActionIndex = 1,
                 RunActionIndex = 2,
                 SkillActionIndex = 4,
                 ActionPlaySpeedOverrides = new Dictionary<int, float>
@@ -181,6 +182,7 @@ public static class VehicleDatabase
                 TexturePath = "fenril_blue.bmd",
                 RiderHeightOffset = 0f,
                 IdleActionIndex = 0,
+                WalkActionIndex = 1,
                 RunActionIndex = 2,
                 SkillActionIndex = 4,
                 ActionPlaySpeedOverrides = new Dictionary<int, float>
@@ -202,6 +204,7 @@ public static class VehicleDatabase
                 TexturePath = "fenril_gold.bmd",
                 RiderHeightOffset = 0f,
                 IdleActionIndex = 0,
+                WalkActionIndex = 1,
                 RunActionIndex = 2,
                 SkillActionIndex = 4,
                 ActionPlaySpeedOverrides = new Dictionary<int, float>
@@ -223,6 +226,7 @@ public static class VehicleDatabase
                 TexturePath = "fenril_red.bmd",
                 RiderHeightOffset = 0f,
                 IdleActionIndex = 0,
+                WalkActionIndex = 1,
                 RunActionIndex = 2,
                 SkillActionIndex = 4,
                 ActionPlaySpeedOverrides = new Dictionary<int, float>
@@ -244,6 +248,7 @@ public static class VehicleDatabase
                 TexturePath = "fenrir_black.bmd",
                 RiderHeightOffset = 0f,
                 IdleActionIndex = 0,
+                WalkActionIndex = 1,
                 RunActionIndex = 2,
                 SkillActionIndex = 4,
                 ActionPlaySpeedOverrides = new Dictionary<int, float>
@@ -265,6 +270,7 @@ public static class VehicleDatabase
                 TexturePath = "fenrir_blue.bmd",
                 RiderHeightOffset = 0f,
                 IdleActionIndex = 0,
+                WalkActionIndex = 1,
                 RunActionIndex = 2,
                 SkillActionIndex = 4,
                 ActionPlaySpeedOverrides = new Dictionary<int, float>
@@ -286,6 +292,7 @@ public static class VehicleDatabase
                 TexturePath = "fenrir_gold.bmd",
                 RiderHeightOffset = 0f,
                 IdleActionIndex = 0,
+                WalkActionIndex = 1,
                 RunActionIndex = 2,
                 SkillActionIndex = 4,
                 ActionPlaySpeedOverrides = new Dictionary<int, float>
@@ -307,6 +314,7 @@ public static class VehicleDatabase
                 TexturePath = "fenrir_red.bmd",
                 RiderHeightOffset = 0f,
                 IdleActionIndex = 0,
+                WalkActionIndex = 1,
                 RunActionIndex = 2,
                 SkillActionIndex = 4,
                 ActionPlaySpeedOverrides = new Dictionary<int, float>

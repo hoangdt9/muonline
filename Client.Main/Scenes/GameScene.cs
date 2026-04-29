@@ -10,6 +10,7 @@ using Microsoft.Xna.Framework.Input;
 using MUnique.OpenMU.Network.Packets.ServerToClient;
 using Client.Main.Objects;
 using Client.Main.Core.Utilities;
+using Client.Main.Core.Client;
 using Client.Main.Networking.PacketHandling.Handlers; // For CharacterClassNumber
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -52,7 +53,7 @@ namespace Client.Main.Scenes
         private double _pingTimer = 0;
         private int? _lastPingValue = null;
         private PauseMenuControl _pauseMenu; // ESC menu
-        private Controls.UI.Game.Skills.SkillQuickSlot _skillQuickSlot; // Skill quick slot
+        private HudHotbarStripControl _hudHotbar;
         private Controls.UI.Game.Skills.SkillSelectionPanel _skillSelectionPanel; // Skill selection panel (independent)
         private ActiveBuffsPanel _activeBuffsPanel; // Active buffs display (top-left corner)
         private Texture2D _backgroundTexture;
@@ -179,16 +180,22 @@ namespace Client.Main.Scenes
             Controls.Add(_pauseMenu);
             _pauseMenu.BringToFront();
 
-            // Skill selection panel (independent, not child of quick slot)
+            // Skill selection + bottom HUD hotbar (Q,W,E + digits — binds CharacterState)
             _skillSelectionPanel = new Controls.UI.Game.Skills.SkillSelectionPanel();
             Controls.Add(_skillSelectionPanel);
 
-            // Skill quick slot
-            _skillQuickSlot = new Controls.UI.Game.Skills.SkillQuickSlot(MuGame.Network.GetCharacterState());
-            _skillQuickSlot.SetSelectionPanel(_skillSelectionPanel); // Connect panel
-            Controls.Add(_skillQuickSlot);
-            _skillQuickSlot.BringToFront();
-            _skillController = new GameSceneSkillController(this, _skillQuickSlot, _logger, _duelController.IsDuelAttackTarget);
+            CharacterState characterState = MuGame.Network.GetCharacterState();
+            _hudHotbar = new HudHotbarStripControl(characterState, _skillSelectionPanel);
+            Controls.Add(_hudHotbar);
+            _hudHotbar.BringToFront();
+
+            _skillSelectionPanel.SkillSelected += skill =>
+            {
+                characterState.SetHudSkillId(characterState.ArmedHudHotkeySlotIndex, skill.SkillId);
+                _hudHotbar.RefreshFromState();
+            };
+
+            _skillController = new GameSceneSkillController(this, characterState, _logger, _duelController.IsDuelAttackTarget);
 
             // Experience bar
             var experienceBar = new ExperienceBarControl(MuGame.Network.GetCharacterState());
@@ -221,6 +228,9 @@ namespace Client.Main.Scenes
                 _chatInput,
                 _chatLog,
                 _objectEditorController,
+                _skillSelectionPanel,
+                characterState,
+                _hudHotbar,
                 _logger);
 
             try
@@ -314,6 +324,10 @@ namespace Client.Main.Scenes
                     charState.PositionY,
                     charState.MapId
                 );
+
+                HudHotkeysPersistence.TryApply(charState);
+                charState.EnsureDefaultHudHotkeys();
+                _hudHotbar?.RefreshFromState();
 
                 _hero.NetworkId = charState.Id;
                 _hero.Location = new Vector2(charState.PositionX, charState.PositionY);

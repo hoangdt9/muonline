@@ -62,6 +62,25 @@ namespace Client.Main.Controls.UI.Game.Inventory
         public const int Rows = 8;
         internal const int InventorySlotOffsetConstant = 12;
 
+        /// <summary>
+        /// Returns the hovered inventory slot byte if it holds a consumable (potions/apples, etc.), excluding upgrade jewels.
+        /// Used for Shift+Q/W/E quick binds.
+        /// </summary>
+        public byte? TryGetHoveredConsumableInventorySlot()
+        {
+            if (_hoveredSlot.X < 0 || _hoveredSlot.Y < 0 || _hoveredItem == null)
+            {
+                return null;
+            }
+
+            if (_hoveredItem.Definition?.IsConsumable() != true || _hoveredItem.Definition?.IsUpgradeJewel() == true)
+            {
+                return null;
+            }
+
+            return (byte)(InventorySlotOffsetConstant + (_hoveredSlot.Y * Columns) + _hoveredSlot.X);
+        }
+
         // ═══════════════════════════════════════════════════════════════
         // MODERN DARK THEME
         // ═══════════════════════════════════════════════════════════════

@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using Client.Data.ATT;
 using Client.Main.Controls;
-using Client.Main.Controls.UI.Game.Skills;
+using Client.Main.Core.Client;
 using Client.Main.Core.Utilities;
 using Client.Main.Objects;
 using Client.Main.Objects.Player;
@@ -21,7 +21,7 @@ namespace Client.Main.Scenes
         private const ushort EvilSpiritSkillId = 9;
 
         private readonly GameScene _scene;
-        private readonly SkillQuickSlot _skillQuickSlot;
+        private readonly CharacterState _characterState;
         private readonly ILogger _logger;
         private readonly Func<PlayerObject, bool> _isDuelAttackTarget;
 
@@ -37,14 +37,19 @@ namespace Client.Main.Scenes
 
         public GameSceneSkillController(
             GameScene scene,
-            SkillQuickSlot skillQuickSlot,
+            CharacterState characterState,
             ILogger logger,
             Func<PlayerObject, bool> isDuelAttackTarget)
         {
             _scene = scene ?? throw new ArgumentNullException(nameof(scene));
-            _skillQuickSlot = skillQuickSlot ?? throw new ArgumentNullException(nameof(skillQuickSlot));
+            _characterState = characterState ?? throw new ArgumentNullException(nameof(characterState));
             _logger = logger;
             _isDuelAttackTarget = isDuelAttackTarget ?? (_ => false);
+        }
+
+        private SkillEntryState GetEquippedSkillForActions()
+        {
+            return _characterState.TryGetArmedSkill();
         }
 
         public void Update()
@@ -72,7 +77,7 @@ namespace Client.Main.Scenes
             if (mouse.RightButton != ButtonState.Pressed)
                 return;
 
-            var skill = _skillQuickSlot.SelectedSkill;
+            var skill = GetEquippedSkillForActions();
             if (skill == null)
                 return;
 
@@ -247,7 +252,8 @@ namespace Client.Main.Scenes
                 return;
             }
 
-            if (_skillQuickSlot.SelectedSkill == null || _skillQuickSlot.SelectedSkill.SkillId != _pendingSkill.SkillId)
+            var equipped = GetEquippedSkillForActions();
+            if (equipped == null || equipped.SkillId != _pendingSkill.SkillId)
             {
                 ClearPendingSkill();
                 return;
