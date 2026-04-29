@@ -32,6 +32,8 @@ namespace Client.Main.Networking
         private static readonly byte[] Xor3Keys = DefaultKeys.Xor3Keys;
         private const int ClientVersionLength = 5;
         private const int ClientSerialLength = 16;
+        /// <summary>TCP connect phase timeout so unreachable hosts fail fast instead of hanging indefinitely.</summary>
+        private static readonly TimeSpan TcpConnectTimeout = TimeSpan.FromSeconds(20);
 
         private readonly ILoggerFactory _loggerFactory;
         private readonly ILogger<NetworkManager> _logger;
@@ -229,7 +231,10 @@ namespace Client.Main.Networking
             UpdateState(ClientConnectionState.ConnectingToConnectServer);
             _packetRouter.SetRoutingMode(true); // Set routing to CS mode
 
-            if (await _connectionManager.ConnectAsync(_settings.ConnectServerHost, _settings.ConnectServerPort, false, cancellationToken))
+            using var connectTimeoutCts = new CancellationTokenSource(TcpConnectTimeout);
+            using var connectLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, connectTimeoutCts.Token);
+
+            if (await _connectionManager.ConnectAsync(_settings.ConnectServerHost, _settings.ConnectServerPort, false, connectLinkedCts.Token))
             {
                 _currentHost = _settings.ConnectServerHost;
                 _currentPort = _settings.ConnectServerPort;
@@ -241,7 +246,12 @@ namespace Client.Main.Networking
             }
             else
             {
-                OnErrorOccurred($"Connection to Connect Server {_settings.ConnectServerHost}:{_settings.ConnectServerPort} failed.");
+                _logger.LogWarning(
+                    "Connect Server unreachable or timed out after {Timeout}s ({Host}:{Port}). Check MuOnlineSettings host/port and that OpenMU exposes port 44405.",
+                    TcpConnectTimeout.TotalSeconds,
+                    _settings.ConnectServerHost,
+                    _settings.ConnectServerPort);
+                OnErrorOccurred($"Connection to Connect Server {_settings.ConnectServerHost}:{_settings.ConnectServerPort} failed or timed out ({TcpConnectTimeout.TotalSeconds:0}s).");
                 UpdateState(ClientConnectionState.Disconnected);
             }
         }
@@ -542,6 +552,20 @@ namespace Client.Main.Networking
             });
         }
 
+        /// <summary>
+        /// OpenMU's <c>LoopbackIpResolver</c> sends <c>127.127.127.127</c> for local dev. Game servers typically listen on <c>127.0.0.1</c>;
+        /// TCP connects to <c>127.127.127.127</c> may not reach those listeners on macOS/Linux.
+        /// </summary>
+        private static string NormalizeOpenMuGameServerHost(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+                return host;
+
+            return host.Trim().Equals("127.127.127.127", StringComparison.OrdinalIgnoreCase)
+                ? "127.0.0.1"
+                : host.Trim();
+        }
+
         internal async void SwitchToGameServer(string host, int port)
         {
             if (_currentState != ClientConnectionState.RequestingConnectionInfo && _currentState != ClientConnectionState.ReceivedConnectionInfo)
@@ -560,11 +584,24 @@ namespace Client.Main.Networking
             }
             await _connectionManager.DisconnectAsync();
 
+            // OpenMU LoopbackIpResolver advertises 127.127.127.127 (historic MU loopback). Game listeners are often 127.0.0.1;
+            // connecting to 127.127.127.127 can fail on macOS/Linux (listener mismatch). Map to standard loopback.
+            var resolvedHost = NormalizeOpenMuGameServerHost(host);
+            if (!string.Equals(resolvedHost, host, StringComparison.Ordinal))
+            {
+                _logger.LogInformation("Game server host normalized for TCP: {Original} -> {Resolved}", host, resolvedHost);
+            }
+
+            host = resolvedHost;
+
             _logger.LogInformation("Connecting to Game Server {Host}:{Port}...", host, port);
             UpdateState(ClientConnectionState.ConnectingToGameServer);
             _packetRouter.SetRoutingMode(false);
 
-            if (await _connectionManager.ConnectAsync(host, (ushort)port, true, _managerCts.Token))
+            using var gsTimeoutCts = new CancellationTokenSource(TcpConnectTimeout);
+            using var gsLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(_managerCts.Token, gsTimeoutCts.Token);
+
+            if (await _connectionManager.ConnectAsync(host, (ushort)port, true, gsLinkedCts.Token))
             {
                 _currentHost = host;
                 _currentPort = port;
