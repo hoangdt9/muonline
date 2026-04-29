@@ -135,6 +135,14 @@ namespace Client.Main.Scenes
             ClearPendingSkill();
             uint allowedRange = SkillDatabase.GetSkillRange(skill.SkillId);
 
+            // Self buffs / casts must target the hero — never the hovered monster/player (e.g. Swell Life id 48).
+            if (SkillDatabase.IsSelfSkill(skill.SkillId))
+            {
+                if (UseSelfSkill(skill, hero))
+                    _scene.SetMouseInputConsumed();
+                return;
+            }
+
             if (skill.SkillId == TeleportSkillId)
             {
                 var mouseTile = new Vector2(walkableForSkills.MouseTileX, walkableForSkills.MouseTileY);
@@ -572,6 +580,31 @@ namespace Client.Main.Scenes
             _ = MuGame.Network.GetCharacterService().SendSkillRequestAsync(
                 skill.SkillId,
                 target.NetworkId);
+
+            return true;
+        }
+
+        /// <summary>Buffs and skills that apply only to the caster (Season 6: TargetedSkill with caster id).</summary>
+        private bool UseSelfSkill(Core.Client.SkillEntryState skill, PlayerObject hero)
+        {
+            if (skill == null || hero == null)
+                return false;
+
+            // Self buffs should not slide along an existing path while the cast anim plays.
+            hero.StopMovement();
+
+            if (!TryBeginSkillCast(skill, hero))
+                return false;
+
+            _logger?.LogInformation(
+                "Using self skill {SkillId} (Level {Level}) on self ({SelfId})",
+                skill.SkillId,
+                skill.SkillLevel,
+                hero.NetworkId);
+
+            _ = MuGame.Network.GetCharacterService().SendSkillRequestAsync(
+                skill.SkillId,
+                hero.NetworkId);
 
             return true;
         }

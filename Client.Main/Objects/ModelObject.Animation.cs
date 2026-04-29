@@ -4,6 +4,7 @@ using Client.Main.Controls.UI.Game.Inventory;
 using Client.Main.Models;
 using Client.Main.Objects.Player;
 using Client.Main.Objects.Wings;
+using Microsoft.Extensions.Logging;
 using Microsoft.Xna.Framework;
 using System;
 using System.Buffers;
@@ -14,6 +15,9 @@ namespace Client.Main.Objects
 {
     public abstract partial class ModelObject
     {
+#if DEBUG
+        private static double s_animDegenerateWalkerLogSeconds = double.NegativeInfinity;
+#endif
         // Local animation optimization - per object only
         private struct LocalAnimationState : IEquatable<LocalAnimationState>
         {
@@ -68,6 +72,20 @@ namespace Client.Main.Objects
 
             if (totalFrames == 1 && !ContinuousAnimation)
             {
+#if DEBUG
+                if (this is PlayerObject po && po.IsMainWalker)
+                {
+                    double ts = gameTime.TotalGameTime.TotalSeconds;
+                    if (ts - s_animDegenerateWalkerLogSeconds > 2.0)
+                    {
+                        s_animDegenerateWalkerLogSeconds = ts;
+                        AppLoggerFactory?.CreateLogger(nameof(ModelObject))?.LogWarning(
+                            "[AnimDegenerate] actionIdx={Idx} keys={Keys} lockPos={LockPos} → single-frame pose only " +
+                            "(no interp cycle): sliding/T-pose if combined with movement",
+                            currentActionIndex, action.NumAnimationKeys, action.LockPositions);
+                    }
+                }
+#endif
                 if (actionChanged)
                 {
                     GenerateBoneMatrix(currentActionIndex, 0, 0, 0);
@@ -75,6 +93,12 @@ namespace Client.Main.Objects
                     InvalidateBuffers(BUFFER_FLAG_ANIMATION);
                 }
                 CurrentFrame = 0;
+                // LockPositions can reduce effective frames to 1 while AnimationController still treats the action as a
+                // one-shot (skill/attack). The early return skipped NotifyOneShotAnimationCompleted → skills stayed "busy".
+                // Only complete attack/skill one-shots — avoids fighting walk/move updates if state ever misclassified.
+                if (this is WalkerObject walker && walker.IsAttackOrSkillAnimationPlaying())
+                    walker.NotifyOneShotAnimationCompleted();
+
                 return;
             }
 
@@ -89,7 +113,20 @@ namespace Client.Main.Objects
                 // _blendFromBones is pre-allocated in LoadContent - no need to allocate here
             }
 
-            if (!TryConsumeAnimationDelta(frameDelta, actionChanged, out float delta))
+            // Animation delta throttle (TryConsumeAnimationDelta) skips entire skeleton updates on many frames when
+            // ANIMATION_UPDATE_FPS caps steps — root motion still runs → visible "gliding". Walkers must advance every frame.
+            float delta;
+            if (this is WalkerObject)
+            {
+                if (!float.IsFinite(frameDelta) || frameDelta <= 0f)
+                {
+                    _priorActionIndex = currentActionIndex;
+                    return;
+                }
+
+                delta = frameDelta;
+            }
+            else if (!TryConsumeAnimationDelta(frameDelta, actionChanged, out delta))
             {
                 _priorActionIndex = currentActionIndex;
                 return;

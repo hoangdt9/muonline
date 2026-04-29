@@ -18,6 +18,9 @@ public class VehicleObject : ModelObject
     {
         7,  // Rider 01 (Uniria/Dinorant)
         8,  // Rider 02
+        // Fenrir (fenril_*.bmd / fenrir_*.bmd): run cycles translate the mesh; without locking the wolf
+        // drifts away from the rider pivot while the player stays at the origin → rider appears to slide beside mount.
+        11, 12, 13, 14, 15, 16, 17, 18,
         27, // Pon Up Ride
         28, // Pon Ride
         22, // Griffs Up Ride

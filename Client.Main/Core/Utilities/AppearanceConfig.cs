@@ -73,5 +73,6 @@ public class AppearanceConfig
     public bool HasSkeleton { get; set; } = false;
     public bool HasRudolph { get; set; } = false;
     public bool HasSpiritOfGuardian { get; set; } = false;
-    public short RidingVehicle { get; set; }
+    /// <summary>No mount from AppearanceConfig-based loading (TestAnimationScene). Must not default to 0 (Dark Horse).</summary>
+    public short RidingVehicle { get; set; } = -1;
 }

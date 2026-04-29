@@ -606,6 +606,11 @@ namespace Client.Main.Scenes
                 return;
             }
 
+            // Loading branch forces _progressBar.Visible each frame; teardown runs async—ensure the bar
+            // cannot stay visible during gameplay (otherwise "Loading... 0%" overlays HUD after load).
+            if (_progressBar != null)
+                _progressBar.Visible = false;
+
             using (new SpriteBatchScope(
                        GraphicsManager.Instance.Sprite,
                        SpriteSortMode.Deferred,

@@ -191,6 +191,7 @@ namespace Client.Main.Objects
         public override void Update(GameTime gameTime)
         {
             UpdateDebuffTint();
+            BeforeWalkerSkeletalAnimation(gameTime);
             base.Update(gameTime);
             _animationController?.Update((float)gameTime.ElapsedGameTime.TotalSeconds);
 
@@ -238,6 +239,15 @@ namespace Client.Main.Objects
                 }
                 _previousActionForSound = CurrentAction;
             }
+        }
+
+        /// <summary>
+        /// Runs immediately before <see cref="ModelObject.Animation"/> (via <c>base.Update</c>).
+        /// Player implementations should apply walk/run/fly <see cref="ModelObject.CurrentAction"/> here
+        /// so skeletal poses match movement on the same frame.
+        /// </summary>
+        protected virtual void BeforeWalkerSkeletalAnimation(GameTime gameTime)
+        {
         }
 
         /// <summary>

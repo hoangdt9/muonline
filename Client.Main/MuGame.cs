@@ -10,6 +10,7 @@ using Client.Main.Objects;
 using Client.Main.Scenes;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Console;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
@@ -333,6 +334,11 @@ namespace Client.Main
                         AppConfiguration.GetSection("Logging:SimpleConsole").Bind(options);
                     });
                 }
+                else
+                {
+                    // ClearProviders + only Configuration yields no sink — diagnostics like PlayerObject.LogInformation never appear.
+                    builder.AddConsole();
+                }
             });
 
             _logger = AppLoggerFactory.CreateLogger<MuGame>();
@@ -584,49 +590,41 @@ namespace Client.Main
         {
             _logger.LogInformation("--- ChangeSceneInternal: Starting scene change to {SceneType}...", newScene.GetType().Name);
 
-            // Optional: Show loading screen before disposing the old scene
-            // ShowLoadingScreen();
+            // Initialize the new scene BEFORE swapping ActiveScene. async void yields between awaits:
+            // if ActiveScene pointed at an uninitialized GameScene (World still null), Draw hit the loading
+            // branch while LoadingScreen was already disposed → endless "Loading... 0%" on the splash.
+            BaseScene previous = ActiveScene;
 
-            // Dispose the old scene
-            if (ActiveScene != null)
-            {
-                _logger.LogDebug("--- ChangeSceneInternal: Disposing previous scene ({SceneType})...", ActiveScene.GetType().Name);
-                ActiveScene.Dispose();
-                _logger.LogDebug("--- ChangeSceneInternal: Previous scene disposed.");
-            }
-            ActiveScene = null; // Ensure there's no reference while loading the new one
-
-            // Set the new scene
-            ActiveScene = newScene;
-            _logger.LogDebug("--- ChangeSceneInternal: ActiveScene set to {SceneType}.", ActiveScene.GetType().Name);
-
-            // Initialize/Load the new scene (assuming Initialize/Load is asynchronous)
             try
             {
-                _logger.LogDebug("--- ChangeSceneInternal: Starting initialization for {SceneType}...", ActiveScene.GetType().Name);
+                _logger.LogDebug("--- ChangeSceneInternal: Starting initialization for {SceneType}...", newScene.GetType().Name);
 
-                if (ActiveScene is BaseScene baseScene)
-                {
+                if (newScene is BaseScene baseScene)
                     await baseScene.InitializeWithProgressReporting(null);
-                }
                 else
-                {
-                    await ActiveScene.Initialize();
-                }
+                    await newScene.Initialize();
 
-                _logger.LogDebug("--- ChangeSceneInternal: Initialization completed for {SceneType}.", ActiveScene.GetType().Name);
+                _logger.LogDebug("--- ChangeSceneInternal: Initialization completed for {SceneType}.", newScene.GetType().Name);
+
+                previous?.Dispose();
+                ActiveScene = newScene;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "!!! ChangeSceneInternal: Exception during Initialize() for {SceneType}.", ActiveScene.GetType().Name);
-                // Handle error - maybe return to LoginScene?
-                // ActiveScene = new LoginScene(); // Emergency return
-                // await ActiveScene.Initialize();
-                return; // End scene change after error
+                _logger.LogError(ex, "!!! ChangeSceneInternal: Exception during Initialize() for {SceneType}.", newScene.GetType().Name);
+                try
+                {
+                    newScene.Dispose();
+                }
+                catch (Exception disposeEx)
+                {
+                    _logger.LogDebug(disposeEx, "ChangeSceneInternal: failed to dispose new scene after init error.");
+                }
+
+                ActiveScene = previous;
+                return;
             }
 
-            // Optional: Hide loading screen after the new scene is loaded
-            // HideLoadingScreen();
             _logger.LogInformation("<<< ChangeSceneInternal: Scene change to {SceneType} complete.", ActiveScene.GetType().Name);
         }
 
@@ -661,9 +659,11 @@ namespace Client.Main
 
         private async Task ChangeSceneAsync(Type sceneType)
         {
-            ActiveScene?.Dispose();
-            ActiveScene = (BaseScene)Activator.CreateInstance(sceneType);
-            await ActiveScene.Initialize();
+            var previous = ActiveScene;
+            var next = (BaseScene)Activator.CreateInstance(sceneType);
+            await next.Initialize();
+            previous?.Dispose();
+            ActiveScene = next;
         }
 
         private void UpdateInputInfo(GameTime gameTime)

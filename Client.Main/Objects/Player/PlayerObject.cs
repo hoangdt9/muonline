@@ -87,11 +87,17 @@ namespace Client.Main.Objects.Player
         // Timer for footstep sound playback
         private float _footstepTimer;
 
+#if DEBUG
+        private double _movementAnimDiagLastSeconds = double.NegativeInfinity;
+#endif
+
         // Movement speed/run state (mirrors SourceMain 5.2 behavior)
         private float _runFrames;
         private const float RunActivationFrames = 40f;
         private const float FenrirRunDelayFrames = 20f;
         private const float BaseWalkSpeedUnits = 12f;
+        /// <summary>Default <see cref="ModelObject.AnimationSpeed"/> when not syncing ground stride.</summary>
+        private const float DefaultStrideAnimationSpeed = 25f;
         private const float BaseRunSpeedUnits = 15f;
         private const float WingFastSpeedUnits = 16f;
         private const float DarkHorseSpeedUnits = 17f;
@@ -141,6 +147,9 @@ namespace Client.Main.Objects.Player
         private readonly CharacterService _characterService;
         private readonly NetworkManager _networkManager;
 
+        /// <summary>Stable category for <see cref="TryMovementPipelineDiag"/> — avoids ctor-time null AppLoggerFactory / HeroObject type mismatch.</summary>
+        private static Microsoft.Extensions.Logging.ILogger? _movementDiagLogger;
+
         public PlayerEquipment Equipment { get; } = new PlayerEquipment();
 
         public AppearanceData Appearance { get; private set; }
@@ -185,7 +194,8 @@ namespace Client.Main.Objects.Player
         // ───────────────────────────────── CONSTRUCTOR ─────────────────────────────────
         public PlayerObject(AppearanceData appearance = default)
         {
-            _logger = AppLoggerFactory?.CreateLogger(GetType());
+            // Use base type so appsettings LogLevel "Client.Main.Objects.Player.PlayerObject" applies to HeroObject too.
+            _logger = AppLoggerFactory?.CreateLogger(typeof(PlayerObject));
             HelmMask = new PlayerMaskHelmObject { LinkParentAnimation = true, Hidden = true };
             Helm = new PlayerHelmObject { LinkParentAnimation = true };
             Armor = new PlayerArmorObject { LinkParentAnimation = true };
@@ -212,7 +222,7 @@ namespace Client.Main.Objects.Player
             Interactive = true;
 
             Scale = 0.85f;
-            AnimationSpeed = 25f;
+            AnimationSpeed = DefaultStrideAnimationSpeed;
             CurrentAction = PlayerAction.PlayerStopMale;
             _characterClass = CharacterClassNumber.DarkWizard;
             _isFemale = PlayerActionMapper.IsCharacterFemale(_characterClass);
@@ -387,7 +397,20 @@ namespace Client.Main.Objects.Player
                     SetFacingAngleZ(MathHelper.ToRadians(heroAngleDeg), immediate: true);
                 }
 
-                SendActionToServer(ServerPlayerActionType.Stand1, desiredDir);
+                // Ground idle rotation uses Stand1 so others see facing. While flying (wings),
+                // Stand1 is a *ground* gesture — some servers echo walk/sync packets; the client
+                // then applies MoveTo while idle (ScopeHandler local branch), which reads as
+                // spurious walk/fly leg motion when only moving the mouse. Rotate locally only.
+                bool syncStandToServer = true;
+                if (World is WalkableWorldControl ww)
+                {
+                    var tf = ww.Terrain.RequestTerrainFlag((int)Location.X, (int)Location.Y);
+                    if (GetCurrentMovementMode(ww, tf) == MovementMode.Fly)
+                        syncStandToServer = false;
+                }
+
+                if (syncStandToServer)
+                    SendActionToServer(ServerPlayerActionType.Stand1, desiredDir);
             }
         }
 
@@ -1390,19 +1413,24 @@ namespace Client.Main.Objects.Player
                 UpdateHeadRotationTowardsCursor();
             }
 
-            base.Update(gameTime); // movement, camera for main walker, etc.
+            base.Update(gameTime); // WalkerObject: skeletal Animation runs inside base after BeforeWalkerSkeletalAnimation
 
             UpdateEquipmentAnimationStride();
 
-            if (World is not WalkableWorldControl world)
+            if (World is WalkableWorldControl)
+                UpdateWingAnimationSpeed();
+        }
+
+        /// <inheritdoc cref="WalkerObject.BeforeWalkerSkeletalAnimation" />
+        protected override void BeforeWalkerSkeletalAnimation(GameTime gameTime)
+        {
+            if (World is not WalkableWorldControl w)
                 return;
 
             if (IsMainWalker)
-                UpdateLocalPlayer(world, gameTime);
+                UpdateLocalPlayer(w, gameTime);
             else
-                UpdateRemotePlayer(world, gameTime);
-
-            UpdateWingAnimationSpeed();
+                UpdateRemotePlayer(w, gameTime);
         }
 
         public override void Draw(GameTime gameTime)
@@ -1432,6 +1460,7 @@ namespace Client.Main.Objects.Player
             Weapon1?.SetAnimationUpdateStride(desiredStride);
             Weapon2?.SetAnimationUpdateStride(desiredStride);
             EquippedWings?.SetAnimationUpdateStride(desiredStride);
+            Vehicle?.SetAnimationUpdateStride(desiredStride);
 
             _lastEquipmentAnimationStride = desiredStride;
         }
@@ -1480,7 +1509,7 @@ namespace Client.Main.Objects.Player
         public PlayerAction GetSkillAction(ushort skillId, bool isInSafeZone)
         {
             int animationId = SkillDatabase.GetSkillAnimation(skillId);
-            if (animationId > 0 && (Model?.Actions == null || animationId < Model.Actions.Length))
+            if (animationId > 0 && Model?.Actions != null && animationId < Model.Actions.Length && Model.Actions[animationId] != null)
                 return (PlayerAction)animationId;
 
             return GetDefaultSkillAction(isInSafeZone);
@@ -1870,6 +1899,52 @@ namespace Client.Main.Objects.Player
             return _runFrames >= RunActivationFrames;
         }
 
+        /// <summary>
+        /// Align walk/run animation cycle rate with <see cref="WalkerObject.MoveSpeed"/> so leg motion matches tile translation (reduces ice-skating).
+        /// Uses one full BMD cycle per cardinal tile step (~<see cref="Constants.TERRAIN_SCALE"/> world units).
+        /// </summary>
+        private void ApplyGroundStrideAnimationSpeed(
+            bool relaxedSafeZone,
+            bool kinematicMoving,
+            MovementMode mode,
+            WeaponContext weapons,
+            bool isInSafeZone,
+            bool isRunning)
+        {
+            if (!kinematicMoving || mode != MovementMode.Walk || _isRiding)
+            {
+                AnimationSpeed = DefaultStrideAnimationSpeed;
+                return;
+            }
+
+            PlayerAction refAction = relaxedSafeZone
+                ? GetRelaxedWalkAction()
+                : GetMovementAction(MovementMode.Walk, weapons, isInSafeZone, isRunning);
+
+            refAction = ResolvePlayableMovementAction(refAction, MovementMode.Walk);
+
+            int idx = (int)refAction;
+            if (Model?.Actions == null || idx < 0 || idx >= Model.Actions.Length)
+            {
+                AnimationSpeed = DefaultStrideAnimationSpeed;
+                return;
+            }
+
+            var action = Model.Actions[idx];
+            if (action == null)
+            {
+                AnimationSpeed = DefaultStrideAnimationSpeed;
+                return;
+            }
+
+            int tf = Math.Max(action.LockPositions ? action.NumAnimationKeys - 1 : action.NumAnimationKeys, 1);
+            float ps = action.PlaySpeed == 0 ? 1f : action.PlaySpeed;
+
+            float tileUnits = Constants.TERRAIN_SCALE;
+            float animSpeed = tf * MoveSpeed / (tileUnits * Math.Max(ps, 1e-4f));
+            AnimationSpeed = MathHelper.Clamp(animSpeed, 14f, 88f);
+        }
+
         private static bool IsTwoHandedWeaponKind(WeaponKind kind) =>
             kind == WeaponKind.TwoHandSword ||
             kind == WeaponKind.TwoHandSwordTwo ||
@@ -2042,14 +2117,11 @@ namespace Client.Main.Objects.Player
         private MovementMode GetCurrentMovementMode(WalkableWorldControl world, TWFlags? flagsOverride = null)
         {
             var flags = flagsOverride ?? world.Terrain.RequestTerrainFlag((int)Location.X, (int)Location.Y);
-            // Atlans (index 8) uses swimming by default, but winged players still use fly animations.
+            // Atlans (index 8): swim without wings; with wings always use fly (including safe zones).
             if (world.WorldIndex == 8)
             {
-
-                if (!flags.HasFlag(TWFlags.SafeZone) && HasEquippedWings)
-                {
+                if (HasEquippedWings)
                     return MovementMode.Fly;
-                }
 
                 return flags.HasFlag(TWFlags.SafeZone) ? MovementMode.Walk : MovementMode.Swim;
             }
@@ -2058,11 +2130,11 @@ namespace Client.Main.Objects.Player
             if (world.WorldIndex == 11)
                 return MovementMode.Fly;
 
-            // On every other map we may fly whenever wings are equipped.
-            if (HasEquippedWings && !flags.HasFlag(TWFlags.SafeZone))
-            {
+            // Anywhere else: wings mean hover/flight animations (official UI shows wings outside towns only,
+            // but visually we always fly while wings are equipped).
+            if (HasEquippedWings)
                 return MovementMode.Fly;
-            }
+
             return MovementMode.Walk;
         }
 
@@ -2072,7 +2144,7 @@ namespace Client.Main.Objects.Player
             return mode switch
             {
                 MovementMode.Swim => isRunning ? PlayerAction.PlayerRunSwim : PlayerAction.PlayerWalkSwim,
-                MovementMode.Fly => weapons.PrimaryKind == WeaponKind.Crossbow && !isInSafeZone
+                MovementMode.Fly => weapons.PrimaryKind == WeaponKind.Crossbow
                     ? PlayerAction.PlayerFlyCrossbow
                     : PlayerAction.PlayerFly,
                 _ => isRunning ? GetRunActionForWeapon(weapons) : GetMovementActionForWeapon(weapons)
@@ -2138,7 +2210,7 @@ namespace Client.Main.Objects.Player
         {
             if (mode == MovementMode.Fly)
             {
-                return weapons.PrimaryKind == WeaponKind.Crossbow && !isInSafeZone
+                return weapons.PrimaryKind == WeaponKind.Crossbow
                     ? PlayerAction.PlayerStopFlyCrossbow
                     : PlayerAction.PlayerStopFly;
             }
@@ -2198,6 +2270,57 @@ namespace Client.Main.Objects.Player
         private PlayerAction GetRelaxedIdleAction() => _isFemale ? PlayerAction.PlayerStopFemale : PlayerAction.PlayerStopMale;
         private PlayerAction GetRelaxedWalkAction() => _isFemale ? PlayerAction.PlayerWalkFemale : PlayerAction.PlayerWalkMale;
 
+        /// <summary>Returns true if this action has enough BMD keys to animate (not a single-pose slide).</summary>
+        private bool HasAnimatedAction(PlayerAction action)
+        {
+            int idx = (int)action;
+            return Model?.Actions != null &&
+                   idx >= 0 &&
+                   idx < Model.Actions.Length &&
+                   Model.Actions[idx] != null &&
+                   Model.Actions[idx].NumAnimationKeys > 1;
+        }
+
+        /// <summary>
+        /// When <paramref name="desired"/> maps to a degenerate clip (≤1 key), pick a playable walk/run variant.
+        /// Mirrors <c>muonline</c> anti-slide behavior so movement packets still advance position without foot cycles.
+        /// Does not substitute while riding or while movement mode is swim. Fly falls through to ground
+        /// fallbacks if the fly BMD row is degenerate (avoids freezing locomotion when wings force Fly mode).
+        /// </summary>
+        private PlayerAction ResolvePlayableMovementAction(PlayerAction desired, MovementMode mode)
+        {
+            if (HasAnimatedAction(desired))
+                return desired;
+
+            if (_isRiding || mode == MovementMode.Swim)
+                return CurrentAction;
+
+            // Fly clips should animate; if a fly row is missing/degenerate, fall through to ground fallbacks
+            // instead of freezing on CurrentAction (wings/Icarus always use Fly mode).
+            PlayerAction[] movementFallbacks =
+            {
+                GetRelaxedWalkAction(),
+                PlayerAction.PlayerWalkMale,
+                PlayerAction.PlayerWalkFemale,
+                PlayerAction.PlayerWalkSword,
+                PlayerAction.PlayerWalkSpear,
+                PlayerAction.PlayerWalkCrossbow,
+                PlayerAction.PlayerRun,
+                PlayerAction.PlayerRunSword,
+                PlayerAction.PlayerRunSpear,
+                PlayerAction.PlayerRunCrossbow
+            };
+
+            for (int i = 0; i < movementFallbacks.Length; i++)
+            {
+                var candidate = movementFallbacks[i];
+                if (HasAnimatedAction(candidate))
+                    return candidate;
+            }
+
+            return CurrentAction;
+        }
+
         // ───────────────────────────────── VEHICLE/MOUNT SUPPORT ─────────────────────────────────
 
         /// <summary>
@@ -2218,51 +2341,80 @@ namespace Client.Main.Objects.Player
                 return false;
 
             var itemDef = ItemDatabase.GetItemDefinition(petData);
-            if (itemDef == null)
-                return false;
-
-            string itemName = itemDef.Name?.ToLowerInvariant() ?? string.Empty;
-
-            // Map pet items to vehicle indices
-            vehicleIndex = MapPetToVehicleIndex(itemName, itemDef.Id);
+            vehicleIndex = MapPetToVehicleIndex(petData, itemDef);
             return vehicleIndex >= 0;
         }
 
         /// <summary>
-        /// Maps pet item name/id to the corresponding VehicleDatabase index.
+        /// Maps pet slot bytes / optional items.bmd row to VehicleDatabase index.
+        /// When <paramref name="itemDef"/> is null (items.bmd mismatch), uses group/id fallback.
         /// </summary>
-        private static short MapPetToVehicleIndex(string itemNameLower, int itemId)
+        private static short MapPetToVehicleIndex(ReadOnlySpan<byte> petData, ItemDefinition itemDef)
         {
+            string itemNameLower = itemDef?.Name?.ToLowerInvariant() ?? string.Empty;
+
             // Dark Horse variations
             if (itemNameLower.Contains("dark horse"))
-                return 0; // Dark Horse
+                return 0;
 
-            // Dinorant
+            // Dinorant / Uniria (name-based — IDs vary by season file)
             if (itemNameLower.Contains("uniria"))
-                return 7; // Rider 01
+                return 7;
 
             if (itemNameLower.Contains("dinorant"))
-                return 8; // Rider 02
+                return 8;
 
-            // Horn of Fenrir variations - check for different colors
+            // Horn of Fenrir variations
             if (itemNameLower.Contains("horn of"))
             {
                 if (itemNameLower.Contains("black"))
-                    return 11; // Fenrir Black
+                    return 11;
                 if (itemNameLower.Contains("blue"))
-                    return 12; // Fenrir Blue
+                    return 12;
                 if (itemNameLower.Contains("gold"))
-                    return 13; // Fenrir Gold
+                    return 13;
                 if (itemNameLower.Contains("red"))
-                    return 14; // Fenrir Red
+                    return 14;
 
                 if (itemNameLower.Contains("fenrir"))
-                    return 14; // Default Horn of Fenrir is red
+                    return 14;
 
-                return 14; // Fenrir Red fallback
+                return 14;
             }
 
-            return -1; // Not a rideable pet
+            return MapPetSlotToVehicleIndexByGroupNumber(petData);
+        }
+
+        /// <summary>
+        /// Resolves mount when item name is missing or not English (items.bmd vs server encoding).
+        /// Group 13: Dark Horse = 4, Horn of Fenrir = 37 (Season 6 / common MU tables).
+        /// </summary>
+        private static short MapPetSlotToVehicleIndexByGroupNumber(ReadOnlySpan<byte> petData)
+        {
+            byte group = ItemDatabase.GetItemGroup(petData);
+            if (group != 13)
+                return -1;
+
+            short num = 0;
+            if (ItemDataParser.TryParseExtendedItemData(petData, out var ext))
+            {
+                num = ext.Number;
+            }
+            else if (petData.Length >= 6)
+            {
+                num = petData[0];
+            }
+            else
+            {
+                return -1;
+            }
+
+            return num switch
+            {
+                4 => 0, // Dark Horse
+                37 => 14, // Horn of Fenrir → default red Fenrir model (VehicleDatabase 14)
+                _ => -1,
+            };
         }
 
         /// <summary>
@@ -2363,13 +2515,17 @@ namespace Client.Main.Objects.Player
                 float deltaOffset = targetOffset - _currentRiderHeightOffset;
                 Position = new Vector3(Position.X, Position.Y, Position.Z + deltaOffset);
                 _currentRiderHeightOffset = targetOffset;
+            }
 
-                // Apply compensating negative offset to the vehicle so it stays at ground level
-                // (since vehicle inherits parent transform, we need to counter the player's Z offset)
-                if (Vehicle != null)
-                {
-                    Vehicle.Position = new Vector3(Vehicle.Position.X, Vehicle.Position.Y, -targetOffset);
-                }
+            // Keep the mount locked under the rider pivot every frame (XY must stay 0; fenrir BMD root motion
+            // must not accumulate as local translation — see VehicleObject.ApplyPositionLockToAnimations).
+            if (Vehicle != null && _isRiding && !Vehicle.Hidden)
+            {
+                Vehicle.Position = new Vector3(0f, 0f, -targetOffset);
+            }
+            else if (Vehicle != null && Vehicle.Hidden)
+            {
+                Vehicle.Position = Vector3.Zero;
             }
         }
 
@@ -2633,6 +2789,26 @@ namespace Client.Main.Objects.Player
                 _ => MovementMode.Walk
             };
 
+        /// <summary>
+        /// Pick locomotion mode for <see cref="GetMovementAction"/> / idle.
+        /// While a path is queued but <see cref="WalkerObject.IsMoving"/> is still false, we used to take
+        /// <see cref="GetModeFromCurrentAction"/> — stale ground walk clips then reported <see cref="MovementMode.Walk"/>
+        /// even when terrain requires <see cref="MovementMode.Fly"/> (wings / Icarus), so we requested walk cycles
+        /// instead of fly and movement broke.
+        /// Fly/Swim always follow terrain; Walk blends from the current animation only when terrain says Walk.
+        /// </summary>
+        private MovementMode ResolveLocomotionMode(WalkableWorldControl world, TWFlags flags, bool blendActionWhileGroundedIdle)
+        {
+            MovementMode terrainMode = GetCurrentMovementMode(world, flags);
+            if (!blendActionWhileGroundedIdle)
+                return terrainMode;
+
+            if (terrainMode != MovementMode.Walk)
+                return terrainMode;
+
+            return GetModeFromCurrentAction();
+        }
+
         private bool IsRelaxedSafeZone(WalkableWorldControl world, TWFlags flags) =>
             flags.HasFlag(TWFlags.SafeZone) && !IsBloodCastleMap(world.WorldIndex);
 
@@ -2645,7 +2821,7 @@ namespace Client.Main.Objects.Player
         private PlayerAction GetIdleAction(WalkableWorldControl world, TWFlags flags)
         {
             bool relaxedSafeZone = IsRelaxedSafeZone(world, flags);
-            if (relaxedSafeZone)
+            if (relaxedSafeZone && !HasEquippedWings)
                 return GetRelaxedIdleAction();
 
             if (world.WorldIndex == 8 && !flags.HasFlag(TWFlags.SafeZone))
@@ -2681,25 +2857,33 @@ namespace Client.Main.Objects.Player
             UpdateVehicleState(isInSafeZone);
 
             bool pathQueued = _currentPath?.Count > 0;
-            bool isAboutToMove = IsMoving || pathQueued || MovementIntent;
+            // Raw kinematics (path, intent, or MoveTarget still lerping to Target).
+            bool kinematicMoving = IsMoving || pathQueued || MovementIntent;
+            // Locomotion animation branch only — see skill cast notes below.
+            bool isAboutToMove = kinematicMoving;
+            if (IsAttackOrSkillAnimationPlaying())
+                isAboutToMove = false;
 
-            var mode = (!IsMoving && (pathQueued || MovementIntent))
-                ? GetModeFromCurrentAction()
-                : GetCurrentMovementMode(world, flags);
+            var mode = ResolveLocomotionMode(world, flags, !IsMoving && (pathQueued || MovementIntent));
 
             if (world.WorldIndex == 8 && !isInSafeZone && !HasEquippedWings)
             {
                 mode = MovementMode.Swim;
             }
 
-            bool isRunning = UpdateMovementSpeedAndRunState(world, flags, isAboutToMove);
+            bool isRunning = UpdateMovementSpeedAndRunState(world, flags, kinematicMoving);
+
+            ApplyGroundStrideAnimationSpeed(relaxedSafeZone, kinematicMoving, mode, weapons, isInSafeZone, isRunning);
+
+            PlayerAction? diagPreResolve = null;
+            PlayerAction? diagPostResolve = null;
 
             if (isAboutToMove)
             {
                 ResetRestSitStates();
 
                 PlayerAction desired;
-                if (relaxedSafeZone)
+                if (relaxedSafeZone && !HasEquippedWings)
                 {
                     desired = GetRelaxedWalkAction();
                 }
@@ -2715,6 +2899,10 @@ namespace Client.Main.Objects.Player
                     desired = GetMovementAction(mode, weapons, isInSafeZone, isRunning);
                 }
 
+                diagPreResolve = desired;
+                desired = ResolvePlayableMovementAction(desired, mode);
+                diagPostResolve = desired;
+
                 if (!IsOneShotPlaying && CurrentAction != desired)
                     PlayAction((ushort)desired);
                 PlayFootstepSound(world, gameTime);
@@ -2722,7 +2910,7 @@ namespace Client.Main.Objects.Player
             else if (!IsOneShotPlaying)
             {
                 PlayerAction idleAction;
-                if (relaxedSafeZone)
+                if (relaxedSafeZone && !HasEquippedWings)
                 {
                     idleAction = GetRelaxedIdleAction();
                 }
@@ -2747,13 +2935,101 @@ namespace Client.Main.Objects.Player
                 if (CurrentAction != idleAction)
                     PlayAction((ushort)idleAction);
             }
+            TryMovementPipelineDiag(world, gameTime, flags, relaxedSafeZone, pathQueued, kinematicMoving, isAboutToMove, mode, isRunning,
+                diagPreResolve, diagPostResolve);
+        }
+
+        /// <summary>BMD effective frame count matching <see cref="ModelObject.Animation"/> (LockPositions adjusts length).</summary>
+        private int GetEffectiveTotalFrames(PlayerAction action)
+        {
+            int idx = (int)action;
+            if (Model?.Actions == null || idx < 0 || idx >= Model.Actions.Length || Model.Actions[idx] == null)
+                return -1;
+
+            var a = Model.Actions[idx];
+            return Math.Max(a.LockPositions ? a.NumAnimationKeys - 1 : a.NumAnimationKeys, 1);
+        }
+
+        /// <summary>
+        /// Throttled pipeline log: filter console for <c>[MovementPipe]</c>. Compare pre/post resolve when moving.
+        /// </summary>
+        private void TryMovementPipelineDiag(
+            WalkableWorldControl world,
+            GameTime gameTime,
+            TWFlags flags,
+            bool relaxedSafeZone,
+            bool pathQueued,
+            bool kinematicMoving,
+            bool isAboutToMove,
+            MovementMode mode,
+            bool isRunning,
+            PlayerAction? preResolveDesired,
+            PlayerAction? postResolveDesired)
+        {
+            if (!IsMainWalker)
+                return;
+
+            double now = gameTime.TotalGameTime.TotalSeconds;
+            if (now - _movementAnimDiagLastSeconds < 0.55)
+                return;
+            _movementAnimDiagLastSeconds = now;
+
+            int curIdx = (int)CurrentAction;
+            int curKeys = -1;
+            bool lockPos = false;
+            if (Model?.Actions != null && curIdx >= 0 && curIdx < Model.Actions.Length && Model.Actions[curIdx] != null)
+            {
+                var act = Model.Actions[curIdx];
+                curKeys = act.NumAnimationKeys;
+                lockPos = act.LockPositions;
+            }
+
+            int effCur = GetEffectiveTotalFrames((PlayerAction)CurrentAction);
+            bool hasAnimCur = HasAnimatedAction((PlayerAction)CurrentAction);
+            bool hasAnimPre = preResolveDesired.HasValue && HasAnimatedAction(preResolveDesired.Value);
+
+            _movementDiagLogger ??= MuGame.AppLoggerFactory?.CreateLogger("MuOnline.MovementDiag");
+            _movementDiagLogger?.LogInformation(
+                "[MovementPipe] cur={Cur} idx={Cidx} keys={Ckeys} effFrames={Eff} lock={Lock} frame={Frame} animT={AnimT} hasAnimCur={HaCur} spd={Spd} " +
+                "pre={Pre} post={Post} hasAnimPre={HaPre} mode={Mode} ride={Ride} vehHidden={VehHid} kin={Kin} about={About} move={Move} intent={Intent} path={Path} run={Run} " +
+                "map={Map} tile=({Tx},{Ty}) safe={Safe} relaxSZ={Relax} wings={Wings}",
+                (PlayerAction)CurrentAction,
+                curIdx,
+                curKeys,
+                effCur,
+                lockPos,
+                CurrentFrame,
+                _animTime,
+                hasAnimCur,
+                AnimationSpeed,
+                preResolveDesired?.ToString() ?? "(idle-branch)",
+                postResolveDesired?.ToString() ?? "(idle-branch)",
+                hasAnimPre,
+                mode,
+                _isRiding,
+                Vehicle?.Hidden ?? true,
+                kinematicMoving,
+                isAboutToMove,
+                IsMoving,
+                MovementIntent,
+                _currentPath?.Count ?? 0,
+                isRunning,
+                world.WorldIndex,
+                (int)Location.X,
+                (int)Location.Y,
+                flags.HasFlag(TWFlags.SafeZone),
+                relaxedSafeZone,
+                HasEquippedWings);
         }
 
         // --------------- REMOTE PLAYERS ----------------
         private void UpdateRemotePlayer(WalkableWorldControl world, GameTime gameTime)
         {
             bool pathQueued = _currentPath?.Count > 0;
-            bool isAboutToMove = IsMoving || pathQueued || MovementIntent;
+            bool kinematicMoving = IsMoving || pathQueued || MovementIntent;
+            bool isAboutToMove = kinematicMoving;
+            if (IsAttackOrSkillAnimationPlaying())
+                isAboutToMove = false;
 
             var flags = world.Terrain.RequestTerrainFlag((int)Location.X, (int)Location.Y);
             bool isInSafeZone = flags.HasFlag(TWFlags.SafeZone);
@@ -2763,22 +3039,22 @@ namespace Client.Main.Objects.Player
             UpdateWeaponHolsterState(isInSafeZone);
             UpdateVehicleStateFromAppearance(isInSafeZone);
 
-            var mode = (!IsMoving && (pathQueued || MovementIntent))
-                ? GetModeFromCurrentAction()
-                : GetCurrentMovementMode(world, flags);
+            var mode = ResolveLocomotionMode(world, flags, !IsMoving && (pathQueued || MovementIntent));
 
             if (world.WorldIndex == 8 && !isInSafeZone && !HasEquippedWings)
             {
                 mode = MovementMode.Swim;
             }
 
-            bool isRunning = UpdateMovementSpeedAndRunState(world, flags, isAboutToMove);
+            bool isRunning = UpdateMovementSpeedAndRunState(world, flags, kinematicMoving);
+
+            ApplyGroundStrideAnimationSpeed(relaxedSafeZone, kinematicMoving, mode, weapons, isInSafeZone, isRunning);
 
             if (isAboutToMove)
             {
                 ResetRestSitStates();
                 PlayerAction desired;
-                if (relaxedSafeZone)
+                if (relaxedSafeZone && !HasEquippedWings)
                 {
                     desired = GetRelaxedWalkAction();
                 }
@@ -2794,6 +3070,8 @@ namespace Client.Main.Objects.Player
                     desired = GetMovementAction(mode, weapons, isInSafeZone, isRunning);
                 }
 
+                desired = ResolvePlayableMovementAction(desired, mode);
+
                 if (!IsOneShotPlaying && CurrentAction != desired)
                     PlayAction((ushort)desired);
                 PlayFootstepSound(world, gameTime);
@@ -2801,7 +3079,7 @@ namespace Client.Main.Objects.Player
             else if (!IsOneShotPlaying)
             {
                 PlayerAction idleAction;
-                if (relaxedSafeZone)
+                if (relaxedSafeZone && !HasEquippedWings)
                 {
                     idleAction = GetRelaxedIdleAction();
                 }
