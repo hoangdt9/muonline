@@ -22,6 +22,8 @@
 
   <PropertyGroup>
     <DefineConstants>$(DefineConstants);MACOS</DefineConstants>
+    <!-- macOS: MGCB shader (.fx) build needs Wine+MGFXC; default to shipped DesktopGL .xnb prebuilts -->
+    <UsePrebuiltContent Condition="'$(UsePrebuiltContent)' == '' and $([MSBuild]::IsOSPlatform(`osx`))">true</UsePrebuiltContent>
     <UsePrebuiltContent Condition="'$(UsePrebuiltContent)' == ''">false</UsePrebuiltContent>
     <HasWine Condition="'$(HasWine)' == ''">unknown</HasWine>
     <PrebuiltContentDir>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../Client.Main/MGContent/PrebuiltContent/DesktopGL/Content'))</PrebuiltContentDir>

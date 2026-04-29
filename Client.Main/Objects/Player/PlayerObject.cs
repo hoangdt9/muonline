@@ -148,7 +148,7 @@ namespace Client.Main.Objects.Player
         private readonly NetworkManager _networkManager;
 
         /// <summary>Stable category for <see cref="TryMovementPipelineDiag"/> — avoids ctor-time null AppLoggerFactory / HeroObject type mismatch.</summary>
-        private static Microsoft.Extensions.Logging.ILogger? _movementDiagLogger;
+        private static Microsoft.Extensions.Logging.ILogger _movementDiagLogger;
 
         public PlayerEquipment Equipment { get; } = new PlayerEquipment();
 
