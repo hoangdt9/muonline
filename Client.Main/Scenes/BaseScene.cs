@@ -1,4 +1,4 @@
-﻿using Client.Main.Controllers;
+using Client.Main.Controllers;
 using Client.Main.Controls;
 using Client.Main.Controls.UI;
 using Client.Main.Helpers;
@@ -317,13 +317,12 @@ namespace Client.Main.Scenes
 
         private GameControl FindTopmostUiControlAtPoint(Point mousePosition, bool interactiveOnly)
         {
-            for (int i = Controls.Count - 1; i >= 0; i--)
+            var snapshot = Controls.GetSnapshot();
+            for (int i = snapshot.Count - 1; i >= 0; i--)
             {
-                var hit = FindTopmostUiControlAtPointRecursive(Controls[i], mousePosition, interactiveOnly);
+                var hit = FindTopmostUiControlAtPointRecursive(snapshot[i], mousePosition, interactiveOnly);
                 if (hit != null)
-                {
                     return hit;
-                }
             }
 
             return null;
@@ -336,9 +335,10 @@ namespace Client.Main.Scenes
                 return null;
             }
 
-            for (int i = control.Controls.Count - 1; i >= 0; i--)
+            var children = control.Controls.GetSnapshot();
+            for (int i = children.Count - 1; i >= 0; i--)
             {
-                var childHit = FindTopmostUiControlAtPointRecursive(control.Controls[i], mousePosition, interactiveOnly);
+                var childHit = FindTopmostUiControlAtPointRecursive(children[i], mousePosition, interactiveOnly);
                 if (childHit != null)
                 {
                     return childHit;

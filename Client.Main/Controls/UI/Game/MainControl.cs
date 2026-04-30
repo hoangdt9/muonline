@@ -1,4 +1,4 @@
-﻿using Client.Main.Controllers;
+using Client.Main.Controllers;
 using Client.Main.Controls.UI;
 using Client.Main.Controls.UI.Game.Hud;
 using Client.Main.Controls.UI.Game.Inventory;

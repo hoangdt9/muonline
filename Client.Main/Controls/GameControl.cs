@@ -223,18 +223,14 @@ namespace Client.Main.Controls
                 _isCurrentlyPressedByMouse = false;
             }
 
-            // Iterate over a copy for updating children to prevent collection modification issues
-            // Use direct iteration with bounds checking to avoid ToArray() allocation
-            for (int i = Controls.Count - 1; i >= 0; i--)
+            // Stable snapshot: `for (i = Count-1; …)` only evaluated Count once at loop entry — siblings can
+            // remove controls during Update and invalidate indices (ArgumentOutOfRangeException).
+            var updateSnapshot = Controls.GetSnapshot();
+            for (int i = updateSnapshot.Count - 1; i >= 0; i--)
             {
-                if (i >= Controls.Count) continue; // Skip if collection was modified
-                var control = Controls[i];
-                // If a control was disposed by a previous sibling's update in the same frame,
-                // it might still be in `childrenToUpdate` but its Status would be Disposed.
+                var control = updateSnapshot[i];
                 if (control.Status != GameControlStatus.Disposed)
-                {
                     control.Update(gameTime);
-                }
             }
 
             if (AutoViewSize)

@@ -152,10 +152,18 @@ namespace Client.Main.Controls.UI.Game.Hud
             float dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
             _totalTime = gameTime.TotalGameTime.TotalSeconds;
 
-            _targetHpPct = _state.MaximumHealth > 0 ? _state.CurrentHealth / (float)_state.MaximumHealth : 0f;
-            _targetMpPct = _state.MaximumMana > 0 ? _state.CurrentMana / (float)_state.MaximumMana : 0f;
-            _targetSdPct = _state.MaximumShield > 0 ? _state.CurrentShield / (float)_state.MaximumShield : 0f;
-            _targetAgPct = _state.MaximumAbility > 0 ? _state.CurrentAbility / (float)_state.MaximumAbility : 0f;
+            _targetHpPct = _state.MaximumHealth > 0
+                ? MathHelper.Clamp(_state.CurrentHealth / (float)_state.MaximumHealth, 0f, 1f)
+                : 0f;
+            _targetMpPct = _state.MaximumMana > 0
+                ? MathHelper.Clamp(_state.CurrentMana / (float)_state.MaximumMana, 0f, 1f)
+                : 0f;
+            _targetSdPct = _state.MaximumShield > 0
+                ? MathHelper.Clamp(_state.CurrentShield / (float)_state.MaximumShield, 0f, 1f)
+                : 0f;
+            _targetAgPct = _state.MaximumAbility > 0
+                ? MathHelper.Clamp(_state.CurrentAbility / (float)_state.MaximumAbility, 0f, 1f)
+                : 0f;
 
             _displayHpPct = MathHelper.Lerp(_displayHpPct, _targetHpPct, LerpSpeed * dt);
             _displayMpPct = MathHelper.Lerp(_displayMpPct, _targetMpPct, LerpSpeed * dt);

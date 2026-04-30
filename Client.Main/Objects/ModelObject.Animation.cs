@@ -18,6 +18,24 @@ namespace Client.Main.Objects
 #if DEBUG
         private static double s_animDegenerateWalkerLogSeconds = double.NegativeInfinity;
 #endif
+
+        /// <summary>
+        /// Frames per locomotion cycle — mirrors walker expansion in <see cref="Animation"/> when
+        /// <see cref="BMDTextureAction.LockPositions"/> collapses <see cref="BMDTextureAction.NumAnimationKeys"/>‑derived length to 1
+        /// but keys ≥ 2 (stride sync must use the same cycle length or limbs drift vs translation).
+        /// </summary>
+        internal static int GetWalkerLocomotionCycleFrameCount(BMDTextureAction action)
+        {
+            if (action == null)
+                return 1;
+
+            int totalFrames = Math.Max(action.LockPositions ? action.NumAnimationKeys - 1 : action.NumAnimationKeys, 1);
+            if (action.NumAnimationKeys >= 2 && totalFrames == 1)
+                totalFrames = Math.Max(2, action.NumAnimationKeys);
+
+            return Math.Max(totalFrames, 1);
+        }
+
         // Local animation optimization - per object only
         private struct LocalAnimationState : IEquatable<LocalAnimationState>
         {

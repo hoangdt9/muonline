@@ -1,4 +1,4 @@
-﻿using Client.Main.Configuration;
+using Client.Main.Configuration;
 using Client.Main.Content;
 using Client.Main.Controllers;
 using Client.Main.Controls;
@@ -72,6 +72,13 @@ namespace Client.Main
 
         // Public Instance Properties
         public BaseScene ActiveScene { get; private set; }
+
+        /// <summary>
+        /// True while the next scene is being initialized before <see cref="ActiveScene"/> is swapped.
+        /// Prevents the outgoing scene (e.g. <see cref="GameScene"/>) from overwriting <see cref="Camera"/> each frame
+        /// while the incoming world applies CAP / AfterLoad — fixes black character-select when returning from in-game menu.
+        /// </summary>
+        public bool IsSceneTransitionPending { get; private set; }
         public int Width => _graphics.PreferredBackBufferWidth;
         public int Height => _graphics.PreferredBackBufferHeight;
         public GameWindow GameWindow => this.Window;
@@ -594,38 +601,46 @@ namespace Client.Main
             // if ActiveScene pointed at an uninitialized GameScene (World still null), Draw hit the loading
             // branch while LoadingScreen was already disposed → endless "Loading... 0%" on the splash.
             BaseScene previous = ActiveScene;
+            IsSceneTransitionPending = true;
 
             try
             {
-                _logger.LogDebug("--- ChangeSceneInternal: Starting initialization for {SceneType}...", newScene.GetType().Name);
-
-                if (newScene is BaseScene baseScene)
-                    await baseScene.InitializeWithProgressReporting(null);
-                else
-                    await newScene.Initialize();
-
-                _logger.LogDebug("--- ChangeSceneInternal: Initialization completed for {SceneType}.", newScene.GetType().Name);
-
-                previous?.Dispose();
-                ActiveScene = newScene;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "!!! ChangeSceneInternal: Exception during Initialize() for {SceneType}.", newScene.GetType().Name);
                 try
                 {
-                    newScene.Dispose();
+                    _logger.LogDebug("--- ChangeSceneInternal: Starting initialization for {SceneType}...", newScene.GetType().Name);
+
+                    if (newScene is BaseScene baseScene)
+                        await baseScene.InitializeWithProgressReporting(null);
+                    else
+                        await newScene.Initialize();
+
+                    _logger.LogDebug("--- ChangeSceneInternal: Initialization completed for {SceneType}.", newScene.GetType().Name);
+
+                    previous?.Dispose();
+                    ActiveScene = newScene;
                 }
-                catch (Exception disposeEx)
+                catch (Exception ex)
                 {
-                    _logger.LogDebug(disposeEx, "ChangeSceneInternal: failed to dispose new scene after init error.");
+                    _logger.LogError(ex, "!!! ChangeSceneInternal: Exception during Initialize() for {SceneType}.", newScene.GetType().Name);
+                    try
+                    {
+                        newScene.Dispose();
+                    }
+                    catch (Exception disposeEx)
+                    {
+                        _logger.LogDebug(disposeEx, "ChangeSceneInternal: failed to dispose new scene after init error.");
+                    }
+
+                    ActiveScene = previous;
+                    return;
                 }
 
-                ActiveScene = previous;
-                return;
+                _logger.LogInformation("<<< ChangeSceneInternal: Scene change to {SceneType} complete.", ActiveScene.GetType().Name);
             }
-
-            _logger.LogInformation("<<< ChangeSceneInternal: Scene change to {SceneType} complete.", ActiveScene.GetType().Name);
+            finally
+            {
+                IsSceneTransitionPending = false;
+            }
         }
 
         private void CheckShaderToggles()
@@ -659,11 +674,19 @@ namespace Client.Main
 
         private async Task ChangeSceneAsync(Type sceneType)
         {
-            var previous = ActiveScene;
-            var next = (BaseScene)Activator.CreateInstance(sceneType);
-            await next.Initialize();
-            previous?.Dispose();
-            ActiveScene = next;
+            IsSceneTransitionPending = true;
+            try
+            {
+                var previous = ActiveScene;
+                var next = (BaseScene)Activator.CreateInstance(sceneType);
+                await next.Initialize();
+                previous?.Dispose();
+                ActiveScene = next;
+            }
+            finally
+            {
+                IsSceneTransitionPending = false;
+            }
         }
 
         private void UpdateInputInfo(GameTime gameTime)

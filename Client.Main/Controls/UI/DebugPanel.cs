@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Client.Main.Controllers;
 using Client.Main.Content;
 using Client.Main.Models;
@@ -113,8 +113,11 @@ namespace Client.Main.Controls.UI
 
                 if (shouldRunFastUpdate)
                 {
-                    SetLabelTextIfChanged(_playerCordsLabel, $"Player Cords - X: {walkableWorld.Walker.Location.X}, Y: {walkableWorld.Walker.Location.Y}");
-                    SetLabelTextIfChanged(_mapTileLabel, $"MAP Tile - X: {walkableWorld.MouseTileX}, Y: {walkableWorld.MouseTileY}");
+                    // Walker.Location = logical tile (matches terrain checks). MouseTile* = hover tile under cursor (often differs).
+                    SetLabelTextIfChanged(_playerCordsLabel,
+                        $"Player tile - X: {walkableWorld.Walker.Location.X}, Y: {walkableWorld.Walker.Location.Y}");
+                    SetLabelTextIfChanged(_mapTileLabel,
+                        $"Mouse tile - X: {walkableWorld.MouseTileX}, Y: {walkableWorld.MouseTileY}");
                 }
 
                 if (shouldRunSlowUpdate)
@@ -156,9 +159,10 @@ namespace Client.Main.Controls.UI
                       .Append("GPU Skin: Flag=")
                       .Append(Constants.ENABLE_GPU_SKINNING ? "ON" : "OFF")
                       .Append(" | Backend=")
-                      .Append(ModelObject.IsGpuSkinningBackendSupported ? "OK" : "N/A")
+                      .Append(ModelObject.IsGpuSkinningBackendSupported ? "OK" : "N/A (CPU path)")
                       .Append(" | Drawn=")
-                      .Append(ModelObject.LastFrameGpuSkinnedMeshesDrawn);
+                      .Append(ModelObject.LastFrameGpuSkinnedMeshesDrawn)
+                      .Append(ModelObject.IsGpuSkinningBackendSupported ? "" : " — macOS/GL uses CPU skinning");
                     SetLabelTextIfChanged(_gpuSkinningStatusLabel, _sb.ToString());
 
                     // Update terrain performance metrics display

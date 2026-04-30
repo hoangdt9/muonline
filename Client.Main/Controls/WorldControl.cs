@@ -1,4 +1,4 @@
-﻿using Client.Data.ATT;
+using Client.Data.ATT;
 using Client.Data.CAP;
 using Client.Data.OBJS;
 using Client.Main.Controllers;
@@ -182,6 +182,8 @@ namespace Client.Main.Controls
         private readonly List<MonsterObject> _monsters = [];
         private readonly List<DroppedItemObject> _droppedItems = [];
         private readonly Queue<WorldObject> _objectsToInitialize = [];
+        /// <summary>Serializes <see cref="_objectsToInitialize"/> — enqueue can occur off-thread while <see cref="Update"/> dequeues.</summary>
+        private readonly object _objectsToInitializeLock = new();
         private readonly List<WorldObject> _visibleObjects = [];
         private readonly HashSet<WorldObject> _visibleObjectSet = [];
         private readonly HashSet<WorldObject> _positionDirtyObjects = [];
@@ -361,12 +363,23 @@ namespace Client.Main.Controls
             if (Status != GameControlStatus.Ready) return;
             LastCullWasRebuild = false;
 
-            if (_objectsToInitialize.Count > 0)
+            List<WorldObject> initBatch = null;
+            lock (_objectsToInitializeLock)
             {
-                int initCount = Math.Min(100, _objectsToInitialize.Count);
-                for (int i = 0; i < initCount; i++)
+                if (_objectsToInitialize.Count > 0)
                 {
-                    var obj = _objectsToInitialize.Dequeue();
+                    int initCount = Math.Min(100, _objectsToInitialize.Count);
+                    initBatch = new List<WorldObject>(initCount);
+                    for (int i = 0; i < initCount; i++)
+                        initBatch.Add(_objectsToInitialize.Dequeue());
+                }
+            }
+
+            if (initBatch != null)
+            {
+                for (int i = 0; i < initBatch.Count; i++)
+                {
+                    var obj = initBatch[i];
                     if (obj == null || !ReferenceEquals(obj.World, this) || obj.Status != GameControlStatus.NonInitialized)
                         continue;
 
@@ -517,7 +530,10 @@ namespace Client.Main.Controls
             lock (_positionDirtyObjectsLock)
                 _positionDirtyObjects.Add(e.Control);
             if (e.Control.Status == GameControlStatus.NonInitialized)
-                _objectsToInitialize.Enqueue(e.Control);
+            {
+                lock (_objectsToInitializeLock)
+                    _objectsToInitialize.Enqueue(e.Control);
+            }
         }
 
         private void Object_HiddenChanged(object sender, EventArgs e)
@@ -1054,6 +1070,12 @@ namespace Client.Main.Controls
 
             int sectorX = sector % SpatialSectorsPerAxis;
             int sectorY = sector / SpatialSectorsPerAxis;
+            if ((uint)sectorX >= SpatialSectorsPerAxis || (uint)sectorY >= SpatialSectorsPerAxis)
+            {
+                _spatialOffGridObjects.Add(obj);
+                return;
+            }
+
             _spatialSectors[sectorX, sectorY].Add(obj);
         }
 
@@ -1067,6 +1089,12 @@ namespace Client.Main.Controls
 
             int sectorX = sector % SpatialSectorsPerAxis;
             int sectorY = sector / SpatialSectorsPerAxis;
+            if ((uint)sectorX >= SpatialSectorsPerAxis || (uint)sectorY >= SpatialSectorsPerAxis)
+            {
+                _spatialOffGridObjects.Remove(obj);
+                return;
+            }
+
             _spatialSectors[sectorX, sectorY].Remove(obj);
         }
 
@@ -1458,6 +1486,8 @@ namespace Client.Main.Controls
             _visibleObjectSet.Clear();
             lock (_positionDirtyObjectsLock)
                 _positionDirtyObjects.Clear();
+            lock (_objectsToInitializeLock)
+                _objectsToInitialize.Clear();
             _spatialObjectSectors.Clear();
             _spatialOffGridObjects.Clear();
             _spatialCandidates.Clear();
@@ -1481,7 +1511,8 @@ namespace Client.Main.Controls
         {
             if (worldObject.Status == GameControlStatus.NonInitialized)
             {
-                _objectsToInitialize.Enqueue(worldObject);
+                lock (_objectsToInitializeLock)
+                    _objectsToInitialize.Enqueue(worldObject);
                 return;
             }
 

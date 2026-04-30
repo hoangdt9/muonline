@@ -1,3 +1,4 @@
+using Client.Main;
 using Client.Main.Controllers;
 using Client.Main.Controls;
 using Client.Main.Core.Utilities;
@@ -104,6 +105,15 @@ namespace Client.Main.Objects
 
         public Vector3 MoveTargetPosition { get; set; }
         public float MoveSpeed { get; set; } = Constants.MOVE_SPEED;
+
+        /// <summary>
+        /// World XY distance for the active tile step (~100 cardinal, ~141 diagonal).
+        /// Used so stride-sync animation matches traversal time on diagonals, not only cardinal steps.
+        /// </summary>
+        private float _locomotionSegmentWorldLength = Constants.TERRAIN_SCALE;
+
+        protected float LocomotionSegmentWorldLength => _locomotionSegmentWorldLength;
+
         public bool IsMoving => Vector3.Distance(MoveTargetPosition, TargetPosition) > 0f;
         public new ushort NetworkId { get; set; }
 
@@ -148,9 +158,11 @@ namespace Client.Main.Objects
 
         public void Reset()
         {
+            _currentPath?.Clear();
             _currentPath = null;
             MoveTargetPosition = Vector3.Zero;
             _movementIntent = false;
+            _locomotionSegmentWorldLength = Constants.TERRAIN_SCALE;
 
             // Reset animation state to clear any stuck death animations
             _animationController?.Reset();
@@ -192,6 +204,7 @@ namespace Client.Main.Objects
             _movementIntent = false;
             MoveTargetPosition = TargetPosition;
             Position = TargetPosition;
+            _locomotionSegmentWorldLength = Constants.TERRAIN_SCALE;
         }
 
         public void OnDirectionChanged()
@@ -288,9 +301,10 @@ namespace Client.Main.Objects
             if (actionData == null)
                 return;
 
-            int tf = Math.Max(actionData.LockPositions ? actionData.NumAnimationKeys - 1 : actionData.NumAnimationKeys, 1);
+            int cycleFrames = ModelObject.GetWalkerLocomotionCycleFrameCount(actionData);
             float ps = actionData.PlaySpeed == 0 ? 1f : actionData.PlaySpeed;
-            float animSpeed = tf * MoveSpeed / (Constants.TERRAIN_SCALE * Math.Max(ps, 1e-4f));
+            float segmentUnits = Math.Max(_locomotionSegmentWorldLength, Constants.TERRAIN_SCALE * 0.25f);
+            float animSpeed = cycleFrames * MoveSpeed / (segmentUnits * Math.Max(ps, 1e-4f));
             AnimationSpeed = MathHelper.Clamp(animSpeed, 10f, 130f);
         }
 
@@ -573,6 +587,9 @@ namespace Client.Main.Objects
             MoveTargetPosition = position;
             if (!IsMainWalker) return;
 
+            if (MuGame.Instance?.IsSceneTransitionPending == true)
+                return;
+
             float x = _currentCameraDistance * (float)Math.Cos(_cameraPitch) * (float)Math.Sin(_cameraYaw);
             float y = _currentCameraDistance * (float)Math.Cos(_cameraPitch) * (float)Math.Cos(_cameraYaw);
             float z = _currentCameraDistance * (float)Math.Sin(_cameraPitch);
@@ -660,7 +677,17 @@ namespace Client.Main.Objects
 
         private void MoveTowards(Vector2 target, GameTime gameTime)
         {
+            Vector2 prevTile = Location;
             Location = target;
+
+            if (prevTile != target)
+            {
+                float dx = (target.X - prevTile.X) * Constants.TERRAIN_SCALE;
+                float dy = (target.Y - prevTile.Y) * Constants.TERRAIN_SCALE;
+                float lenSq = dx * dx + dy * dy;
+                if (lenSq > 1f)
+                    _locomotionSegmentWorldLength = MathF.Sqrt(lenSq);
+            }
 
             if (this is MonsterObject monster)
             {

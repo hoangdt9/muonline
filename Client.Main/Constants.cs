@@ -51,6 +51,28 @@ namespace Client.Main
         public static float SOUND_EFFECTS_VOLUME;
 
         // Debug / UI flags
+        /// <summary>
+        /// When true (typically Debug builds): ground locomotion uses walk BMD rows only, ignoring run state.
+        /// Use to verify stride vs translation; Skill ID 42 uses skill rows from <see cref="Core.Utilities.SkillDatabase"/>, not walk.
+        /// </summary>
+        public static bool FORCE_WALK_LOCOMOTION_DIAG;
+
+        /// <summary>
+        /// When true (Debug): throttle-log stride inputs for main player (<see cref="LOG_MOVEMENT_STRIDE_DIAG_INTERVAL_MS"/>).
+        /// </summary>
+        public static bool LOG_MOVEMENT_STRIDE_DIAG;
+
+        public const int LOG_MOVEMENT_STRIDE_DIAG_INTERVAL_MS = 400;
+
+        /// <summary>
+        /// Debug: on foot, while kinematically moving, play <see cref="SKILL_MOVE_TEST_SKILL_ID"/> BMD row instead of walk/run/fly
+        /// to verify skeletal animation during translation (isolates broken locomotion rows vs dead pipeline).
+        /// </summary>
+        public static bool FORCE_SKILL_ANIM_ON_MOVE_TEST;
+
+        /// <summary>Skill index for <see cref="FORCE_SKILL_ANIM_ON_MOVE_TEST"/> (default 42 = Rageful Blow in SkillDatabase).</summary>
+        public static ushort SKILL_MOVE_TEST_SKILL_ID = 42;
+
         public static bool SHOW_DEBUG_PANEL;
         public static bool DRAW_BOUNDING_BOXES;
         public static bool DRAW_BOUNDING_BOXES_INTERACTIVES;
@@ -262,6 +284,10 @@ namespace Client.Main
             BACKGROUND_MUSIC = false;
             SOUND_EFFECTS = false;
             SHOW_DEBUG_PANEL = true;
+            // Skill-row locomotion probe — off by default so wings use real fly clips.
+            FORCE_SKILL_ANIM_ON_MOVE_TEST = false;
+            FORCE_WALK_LOCOMOTION_DIAG = false;
+            LOG_MOVEMENT_STRIDE_DIAG = true;
         }
 #endif
     }

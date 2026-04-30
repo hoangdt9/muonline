@@ -340,6 +340,7 @@ namespace Client.Main.Controllers
             PlayerAction runAction when runAction >= PlayerAction.PlayerRun && runAction <= PlayerAction.PlayerRunSwim
                                                                                => AnimationType.Walk,
             PlayerAction.PlayerFly or PlayerAction.PlayerFlyCrossbow or
+            PlayerAction.PlayerSkillMultishotBowFlying or PlayerAction.PlayerSkillMultishotCrossbowFlying or
             PlayerAction.PlayerRunRide or PlayerAction.PlayerRunRideWeapon or
             PlayerAction.PlayerRunRideHorse or PlayerAction.PlayerDarklordWalk
                                                                                => AnimationType.Walk,

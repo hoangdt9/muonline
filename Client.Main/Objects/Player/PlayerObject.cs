@@ -1,4 +1,4 @@
-﻿using Client.Main.Content;
+using Client.Main.Content;
 using Client.Main.Controls;
 using Client.Main.Data;
 using Client.Main.Models;
@@ -86,6 +86,8 @@ namespace Client.Main.Objects.Player
 
         // Timer for footstep sound playback
         private float _footstepTimer;
+        private double _lastStrideDiagLogMs = -1d;
+        private double _lastSkillMoveTestLogMs = -1d;
 
         // Movement speed/run state (mirrors SourceMain 5.2 behavior)
         private float _runFrames;
@@ -1468,7 +1470,9 @@ namespace Client.Main.Objects.Player
                 return;
 
             bool isFlyingAction = CurrentAction == PlayerAction.PlayerFly ||
-                                  CurrentAction == PlayerAction.PlayerFlyCrossbow;
+                                  CurrentAction == PlayerAction.PlayerFlyCrossbow ||
+                                  CurrentAction == PlayerAction.PlayerSkillMultishotBowFlying ||
+                                  CurrentAction == PlayerAction.PlayerSkillMultishotCrossbowFlying;
 
             float desiredSpeed = 7f;
 
@@ -1949,12 +1953,12 @@ namespace Client.Main.Objects.Player
             if (action == null)
                 return DefaultStrideAnimationSpeed;
 
-            int tf = Math.Max(action.LockPositions ? action.NumAnimationKeys - 1 : action.NumAnimationKeys, 1);
+            int cycleFrames = ModelObject.GetWalkerLocomotionCycleFrameCount(action);
             float ps = action.PlaySpeed == 0 ? 1f : action.PlaySpeed;
 
-            float tileUnits = Constants.TERRAIN_SCALE;
-            float animSpeed = tf * MoveSpeed / (tileUnits * Math.Max(ps, 1e-4f));
-            return MathHelper.Clamp(animSpeed, 14f, 88f);
+            float segmentUnits = Math.Max(LocomotionSegmentWorldLength, Constants.TERRAIN_SCALE * 0.25f);
+            float animSpeed = cycleFrames * MoveSpeed / (segmentUnits * Math.Max(ps, 1e-4f));
+            return MathHelper.Clamp(animSpeed, 10f, 110f);
         }
 
         /// <summary>
@@ -1976,11 +1980,10 @@ namespace Client.Main.Objects.Player
 
             if (mode == MovementMode.Fly)
             {
-                PlayerAction refAction = weapons.PrimaryKind == WeaponKind.Crossbow
-                    ? PlayerAction.PlayerFlyCrossbow
-                    : PlayerAction.PlayerFly;
+                PlayerAction refAction = GetFlyMovementAction(weapons);
                 refAction = ResolvePlayableMovementAction(refAction, MovementMode.Fly);
                 AnimationSpeed = ComputeStrideSyncedAnimationSpeed(refAction);
+                MaybeLogStrideDiag(mode, refAction, locomotionRun: false, kinematicMoving);
                 return;
             }
 
@@ -1988,6 +1991,7 @@ namespace Client.Main.Objects.Player
             {
                 PlayerAction refAction = isRunning ? PlayerAction.PlayerRunSwim : PlayerAction.PlayerWalkSwim;
                 AnimationSpeed = ComputeStrideSyncedAnimationSpeed(refAction);
+                MaybeLogStrideDiag(mode, refAction, isRunning, kinematicMoving);
                 return;
             }
 
@@ -1997,6 +2001,94 @@ namespace Client.Main.Objects.Player
 
             refWalkAction = ResolvePlayableMovementAction(refWalkAction, MovementMode.Walk);
             AnimationSpeed = ComputeStrideSyncedAnimationSpeed(refWalkAction);
+            MaybeLogStrideDiag(mode, refWalkAction, isRunning, kinematicMoving);
+        }
+
+        private void MaybeLogStrideDiag(MovementMode mode, PlayerAction refAction, bool locomotionRun, bool kinematicMoving)
+        {
+            if (!Constants.LOG_MOVEMENT_STRIDE_DIAG || !IsMainWalker || !kinematicMoving)
+                return;
+
+            var game = MuGame.Instance;
+            if (game?.GameTime == null)
+                return;
+
+            double nowMs = game.GameTime.TotalGameTime.TotalMilliseconds;
+            if (_lastStrideDiagLogMs >= 0d &&
+                nowMs - _lastStrideDiagLogMs < Constants.LOG_MOVEMENT_STRIDE_DIAG_INTERVAL_MS)
+                return;
+
+            _lastStrideDiagLogMs = nowMs;
+
+            int idx = (int)refAction;
+            int tf = -1;
+            float ps = -1f;
+            if (Model?.Actions != null && idx >= 0 && idx < Model.Actions.Length && Model.Actions[idx] != null)
+            {
+                var ad = Model.Actions[idx];
+                tf = ModelObject.GetWalkerLocomotionCycleFrameCount(ad);
+                ps = ad.PlaySpeed == 0 ? 1f : ad.PlaySpeed;
+            }
+
+            float seg = Math.Max(LocomotionSegmentWorldLength, Constants.TERRAIN_SCALE * 0.25f);
+            float impliedSpeedUnits = MoveSpeed / Math.Max(Constants.MOVE_SPEED, 1e-4f) * BaseWalkSpeedUnits;
+
+            _logger?.LogInformation(
+                "[StrideDiag] mode={Mode} ref={RefAction} current={Curr} locomotionRun={LocRun} " +
+                "MoveSpeed={MoveSpeed:F1} impliedUnits={Units:F2} AnimSpeed={AnimSpeed:F1} segLen={Seg:F1} tf={Tf} ps={Ps:F3} " +
+                "pathQueued={PathQ} IsMoving={IsMoving} Intent={Intent}",
+                mode,
+                refAction,
+                (PlayerAction)CurrentAction,
+                locomotionRun,
+                MoveSpeed,
+                impliedSpeedUnits,
+                AnimationSpeed,
+                seg,
+                tf,
+                ps,
+                _currentPath?.Count ?? 0,
+                IsMoving,
+                MovementIntent);
+        }
+
+        private void MaybeLogSkillMoveTest(GameTime gameTime, PlayerAction row, bool kinematicMoving, MovementMode mode)
+        {
+            if (!Constants.FORCE_SKILL_ANIM_ON_MOVE_TEST || gameTime == null)
+                return;
+
+            double nowMs = gameTime.TotalGameTime.TotalMilliseconds;
+            if (_lastSkillMoveTestLogMs >= 0d && nowMs - _lastSkillMoveTestLogMs < 600d)
+                return;
+
+            _lastSkillMoveTestLogMs = nowMs;
+
+            int idx = (int)row;
+            int keys = -1;
+            bool lockPos = false;
+            bool rowMissing = Model?.Actions == null || idx < 0 || idx >= Model.Actions.Length || Model.Actions[idx] == null;
+            if (!rowMissing)
+            {
+                var ad = Model.Actions[idx];
+                keys = ad.NumAnimationKeys;
+                lockPos = ad.LockPositions;
+            }
+
+            _logger?.LogWarning(
+                "[SkillMoveTest] skillId={SkillId} row={Row} idx={Idx} keys={Keys} lockPos={Lock} rowMissing={Miss} " +
+                "mode={Mode} kinMoving={Kin} IsMoving={Mov} pathQ={PQ} currAct={Curr} AnimSpd={Aspd:F1}",
+                Constants.SKILL_MOVE_TEST_SKILL_ID,
+                row,
+                idx,
+                keys,
+                lockPos,
+                rowMissing,
+                mode,
+                kinematicMoving,
+                IsMoving,
+                _currentPath?.Count ?? 0,
+                (PlayerAction)CurrentAction,
+                AnimationSpeed);
         }
 
         private static bool IsTwoHandedWeaponKind(WeaponKind kind) =>
@@ -2192,15 +2284,50 @@ namespace Client.Main.Objects.Player
             return MovementMode.Walk;
         }
 
+        /// <summary>Ordered probe when preferred fly row is missing/degenerate in loaded BMD.</summary>
+        private static readonly PlayerAction[] FlyLocomotionFallbackProbe =
+        {
+            PlayerAction.PlayerFly,
+            PlayerAction.PlayerFlyCrossbow,
+            PlayerAction.PlayerSkillMultishotBowFlying,
+            PlayerAction.PlayerSkillMultishotCrossbowFlying,
+        };
+
+        /// <summary>
+        /// Aerial move clip: Season BMDs often put bow/crossbow hover locomotion on multishot-flying rows; sword/staff use <see cref="PlayerAction.PlayerFly"/>.
+        /// </summary>
+        private PlayerAction GetFlyMovementAction(WeaponContext weapons)
+        {
+            return weapons.PrimaryKind switch
+            {
+                WeaponKind.Crossbow => PickFirstAnimatedFlyRow(
+                    PlayerAction.PlayerFlyCrossbow,
+                    PlayerAction.PlayerSkillMultishotCrossbowFlying),
+                WeaponKind.Bow => PickFirstAnimatedFlyRow(
+                    PlayerAction.PlayerSkillMultishotBowFlying,
+                    PlayerAction.PlayerFly),
+                _ => PickFirstAnimatedFlyRow(PlayerAction.PlayerFly),
+            };
+        }
+
+        private PlayerAction PickFirstAnimatedFlyRow(params PlayerAction[] candidates)
+        {
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                if (HasAnimatedAction(candidates[i]))
+                    return candidates[i];
+            }
+
+            return candidates.Length > 0 ? candidates[0] : PlayerAction.PlayerFly;
+        }
+
         /// <summary>Action that should play while moving (gender already cached).</summary>
         private PlayerAction GetMovementAction(MovementMode mode, WeaponContext weapons, bool isInSafeZone, bool isRunning)
         {
             return mode switch
             {
                 MovementMode.Swim => isRunning ? PlayerAction.PlayerRunSwim : PlayerAction.PlayerWalkSwim,
-                MovementMode.Fly => weapons.PrimaryKind == WeaponKind.Crossbow
-                    ? PlayerAction.PlayerFlyCrossbow
-                    : PlayerAction.PlayerFly,
+                MovementMode.Fly => GetFlyMovementAction(weapons),
                 _ => isRunning ? GetRunActionForWeapon(weapons) : GetMovementActionForWeapon(weapons)
             };
         }
@@ -2356,7 +2483,17 @@ namespace Client.Main.Objects.Player
             if (_isRiding || mode == MovementMode.Swim)
                 return CurrentAction;
 
-            // Fly clips should animate; if a fly row is missing/degenerate, fall through to ground fallbacks
+            if (mode == MovementMode.Fly)
+            {
+                for (int i = 0; i < FlyLocomotionFallbackProbe.Length; i++)
+                {
+                    PlayerAction probe = FlyLocomotionFallbackProbe[i];
+                    if (HasAnimatedAction(probe))
+                        return probe;
+                }
+            }
+
+            // Fly clips should animate; if every fly row is missing/degenerate, fall through to ground fallbacks
             // instead of freezing on CurrentAction (wings/Icarus always use Fly mode).
             PlayerAction[] movementFallbacks =
             {
@@ -2842,6 +2979,7 @@ namespace Client.Main.Objects.Player
             CurrentAction switch
             {
                 PlayerAction.PlayerFly or PlayerAction.PlayerFlyCrossbow or
+                PlayerAction.PlayerSkillMultishotBowFlying or PlayerAction.PlayerSkillMultishotCrossbowFlying or
                 PlayerAction.PlayerStopFly or PlayerAction.PlayerStopFlyCrossbow or
                 PlayerAction.PlayerPoseMale1
                     => MovementMode.Fly,
@@ -2920,10 +3058,6 @@ namespace Client.Main.Objects.Player
             bool pathQueued = _currentPath?.Count > 0;
             // Raw kinematics (path, intent, or MoveTarget still lerping to Target).
             bool kinematicMoving = IsMoving || pathQueued || MovementIntent;
-            // Locomotion animation branch only — see skill cast notes below.
-            bool isAboutToMove = kinematicMoving;
-            if (IsAttackOrSkillAnimationPlaying())
-                isAboutToMove = false;
 
             var mode = ResolveLocomotionMode(world, flags, !IsMoving && (pathQueued || MovementIntent));
 
@@ -2932,16 +3066,40 @@ namespace Client.Main.Objects.Player
                 mode = MovementMode.Swim;
             }
 
-            bool isRunning = UpdateMovementSpeedAndRunState(world, flags, kinematicMoving);
+            bool skillMoveTest = Constants.FORCE_SKILL_ANIM_ON_MOVE_TEST &&
+                                 IsMainWalker &&
+                                 kinematicMoving &&
+                                 !_isRiding &&
+                                 mode != MovementMode.Fly;
+            // Locomotion animation branch only — see skill cast notes below.
+            bool isAboutToMove = kinematicMoving;
+            if (IsAttackOrSkillAnimationPlaying() && !skillMoveTest)
+                isAboutToMove = false;
 
-            ApplyGroundStrideAnimationSpeed(relaxedSafeZone, kinematicMoving, mode, weapons, isInSafeZone, isRunning);
+            bool isRunning = UpdateMovementSpeedAndRunState(world, flags, kinematicMoving);
+            bool locomotionRun = isRunning;
+            if (Constants.FORCE_WALK_LOCOMOTION_DIAG && mode == MovementMode.Walk && !_isRiding)
+                locomotionRun = false;
+
+            ApplyGroundStrideAnimationSpeed(relaxedSafeZone, kinematicMoving, mode, weapons, isInSafeZone, locomotionRun);
+
+            if (skillMoveTest && isAboutToMove)
+            {
+                PlayerAction probeAction = GetSkillAction(Constants.SKILL_MOVE_TEST_SKILL_ID, isInSafeZone);
+                AnimationSpeed = ComputeStrideSyncedAnimationSpeed(probeAction);
+            }
 
             if (isAboutToMove)
             {
                 ResetRestSitStates();
 
                 PlayerAction desired;
-                if (relaxedSafeZone && !HasEquippedWings)
+                if (skillMoveTest)
+                {
+                    desired = GetSkillAction(Constants.SKILL_MOVE_TEST_SKILL_ID, isInSafeZone);
+                    MaybeLogSkillMoveTest(gameTime, desired, kinematicMoving, mode);
+                }
+                else if (relaxedSafeZone && !HasEquippedWings)
                 {
                     desired = GetRelaxedWalkAction();
                 }
@@ -2954,12 +3112,18 @@ namespace Client.Main.Objects.Player
                 }
                 else
                 {
-                    desired = GetMovementAction(mode, weapons, isInSafeZone, isRunning);
+                    desired = GetMovementAction(mode, weapons, isInSafeZone, locomotionRun);
                 }
 
-                desired = ResolvePlayableMovementAction(desired, mode);
+                if (!skillMoveTest)
+                    desired = ResolvePlayableMovementAction(desired, mode);
 
-                if (!IsOneShotPlaying && CurrentAction != desired)
+                if (skillMoveTest)
+                {
+                    if (CurrentAction != desired)
+                        PlayAction((ushort)desired);
+                }
+                else if (!IsOneShotPlaying && CurrentAction != desired)
                     PlayAction((ushort)desired);
                 PlayFootstepSound(world, gameTime);
             }
@@ -3018,8 +3182,11 @@ namespace Client.Main.Objects.Player
             }
 
             bool isRunning = UpdateMovementSpeedAndRunState(world, flags, kinematicMoving);
+            bool locomotionRun = isRunning;
+            if (Constants.FORCE_WALK_LOCOMOTION_DIAG && mode == MovementMode.Walk && !_isRiding)
+                locomotionRun = false;
 
-            ApplyGroundStrideAnimationSpeed(relaxedSafeZone, kinematicMoving, mode, weapons, isInSafeZone, isRunning);
+            ApplyGroundStrideAnimationSpeed(relaxedSafeZone, kinematicMoving, mode, weapons, isInSafeZone, locomotionRun);
 
             if (isAboutToMove)
             {
@@ -3038,7 +3205,7 @@ namespace Client.Main.Objects.Player
                 }
                 else
                 {
-                    desired = GetMovementAction(mode, weapons, isInSafeZone, isRunning);
+                    desired = GetMovementAction(mode, weapons, isInSafeZone, locomotionRun);
                 }
 
                 desired = ResolvePlayableMovementAction(desired, mode);

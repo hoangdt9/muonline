@@ -355,7 +355,8 @@ namespace Client.Main.Networking.PacketHandling.Handlers
                 _characterState.UpdatePosition(x, y);
                 _characterState.UpdateMap(mapId);
                 _characterState.UpdateDirection(direction);
-                _characterState.UpdateCurrentHealthShield(currentHp, _characterState.MaximumShield);
+                // Respawn packets carry HP (+ mana); shield often omitted — keep current SD, do not pass MaximumShield as current SD.
+                _characterState.UpdateCurrentHealthShield(currentHp, _characterState.CurrentShield);
                 _characterState.UpdateCurrentManaAbility(currentMana, currentAbility);
                 _characterState.Experience = experience;
                 _characterState.UpdateInventoryZen(money);
