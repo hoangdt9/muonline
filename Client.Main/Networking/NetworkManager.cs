@@ -17,6 +17,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Net.NetworkInformation;
 using System.Threading;
@@ -547,13 +548,31 @@ namespace Client.Main.Networking
             }
             await _connectionManager.DisconnectAsync();
 
-            _logger.LogInformation("Connecting to Game Server {Host}:{Port}...", host, port);
+            var gameServerHost = host;
+            var connectHostCandidate = _settings.ConnectServerHost is "localhost" ? "127.0.0.1" : _settings.ConnectServerHost;
+            var isLoopbackConnectHost = IPAddress.TryParse(connectHostCandidate, out var connectIp) && IPAddress.IsLoopback(connectIp);
+            if (IPAddress.TryParse(host, out var parsedAddress)
+                && isLoopbackConnectHost
+                && parsedAddress.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                && parsedAddress.GetAddressBytes()[0] == 172
+                && parsedAddress.GetAddressBytes()[1] is >= 16 and <= 31)
+            {
+                // OpenMU in Docker may return an internal bridge IP; on same-host local runs we must use loopback.
+                gameServerHost = connectHostCandidate;
+                _logger.LogWarning(
+                    "ConnectServer returned internal address {InternalHost}. Using local host override {OverrideHost}:{Port}.",
+                    host,
+                    gameServerHost,
+                    port);
+            }
+
+            _logger.LogInformation("Connecting to Game Server {Host}:{Port}...", gameServerHost, port);
             UpdateState(ClientConnectionState.ConnectingToGameServer);
             _packetRouter.SetRoutingMode(false);
 
-            if (await _connectionManager.ConnectAsync(host, (ushort)port, true, _managerCts.Token))
+            if (await _connectionManager.ConnectAsync(gameServerHost, (ushort)port, true, _managerCts.Token))
             {
-                _currentHost = host;
+                _currentHost = gameServerHost;
                 _currentPort = port;
 
                 var gsConnection = _connectionManager.Connection;
@@ -563,7 +582,7 @@ namespace Client.Main.Networking
             }
             else
             {
-                OnErrorOccurred($"Connection to Game Server {host}:{port} failed.");
+                OnErrorOccurred($"Connection to Game Server {gameServerHost}:{port} failed.");
                 UpdateState(ClientConnectionState.Disconnected);
             }
         }

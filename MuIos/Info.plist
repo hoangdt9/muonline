@@ -9,9 +9,9 @@
 		<string>GameThumbnail.png</string>
 	</array>
 	<key>CFBundleIdentifier</key>
-	<string>project.MonoGame.MuIos</string>
+	<string>com.sondanggia.muonline.dev</string>
 	<key>MinimumOSVersion</key>
-	<string>11.2</string>
+	<string>12.2</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
