@@ -1,7 +1,10 @@
+using Client.Data.BMD;
 using Client.Main.Content;
 using Client.Main.Models;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using System.Collections.Generic;
+using System.IO;
 
 namespace Client.Main.Objects.Vehicle;
 
@@ -52,6 +55,7 @@ public class VehicleObject : ModelObject
     private float runAnimationSpeedMultiplier = 1.0f;
     private float skillAnimationSpeedMultiplier = 1.0f;
     private int idleActionIndex = DefaultAnimationIdle;
+    private int walkActionIndex = -1;
     private int runActionIndex = DefaultAnimationRun;
     private int skillActionIndex = DefaultAnimationSkill;
     private Dictionary<int, float> actionPlaySpeedOverrides;
@@ -69,6 +73,35 @@ public class VehicleObject : ModelObject
         AnimationSpeed = 25f;
     }
 
+    private static async Task<BMD> TryLoadVehicleModelAsync(string texturePath)
+    {
+        foreach (var relativePath in EnumerateAlternateSkillFilenames(texturePath))
+        {
+            var bmd = await BMDLoader.Instance.Prepare(Path.Combine("Skill", relativePath));
+            if (bmd != null)
+                return bmd;
+        }
+
+        return null;
+    }
+
+    /// <summary>MU packs ship either <c>fenril_*</c> (MuMain OpenData) or <c>fenrir_*</c> spellings.</summary>
+    private static IEnumerable<string> EnumerateAlternateSkillFilenames(string texturePath)
+    {
+        yield return texturePath;
+
+        var fileName = Path.GetFileName(texturePath);
+        var bare = Path.GetFileNameWithoutExtension(fileName);
+        var ext = Path.GetExtension(fileName);
+        if (bare.Length < 8)
+            yield break;
+
+        if (bare.StartsWith("fenrir_", StringComparison.OrdinalIgnoreCase))
+            yield return "fenril_" + bare.Substring(7) + ext;
+        else if (bare.StartsWith("fenril_", StringComparison.OrdinalIgnoreCase))
+            yield return "fenrir_" + bare.Substring(7) + ext;
+    }
+
     private async Task OnChangeIndex()
     {
         if (ItemIndex < 0)
@@ -80,6 +113,7 @@ public class VehicleObject : ModelObject
             runAnimationSpeedMultiplier = 1.0f;
             skillAnimationSpeedMultiplier = 1.0f;
             idleActionIndex = DefaultAnimationIdle;
+            walkActionIndex = -1;
             runActionIndex = DefaultAnimationRun;
             skillActionIndex = DefaultAnimationSkill;
             actionPlaySpeedOverrides = null;
@@ -96,13 +130,12 @@ public class VehicleObject : ModelObject
         runAnimationSpeedMultiplier = riderDefinition.RunAnimationSpeedMultiplier;
         skillAnimationSpeedMultiplier = riderDefinition.SkillAnimationSpeedMultiplier;
         idleActionIndex = riderDefinition.IdleActionIndex;
+        walkActionIndex = riderDefinition.WalkActionIndex;
         runActionIndex = riderDefinition.RunActionIndex;
         skillActionIndex = riderDefinition.SkillActionIndex;
         actionPlaySpeedOverrides = riderDefinition.ActionPlaySpeedOverrides;
 
-        string modelPath = riderDefinition.TexturePath;
-
-        Model = await BMDLoader.Instance.Prepare(Path.Combine("Skill", modelPath));
+        Model = await TryLoadVehicleModelAsync(riderDefinition.TexturePath);
 
         if (Model == null)
         {
@@ -179,6 +212,10 @@ public class VehicleObject : ModelObject
             {
                 multiplier *= runAnimationSpeedMultiplier;
             }
+            else if (walkActionIndex >= 0 && i == walkActionIndex)
+            {
+                multiplier *= runAnimationSpeedMultiplier;
+            }
             else if (i == skillActionIndex)
             {
                 multiplier *= skillAnimationSpeedMultiplier;
@@ -219,10 +256,8 @@ public class VehicleObject : ModelObject
         base.Update(gameTime);
     }
 
-    /// <summary>
-    /// Sets the vehicle animation based on rider state.
-    /// </summary>
-    public void SetRiderAnimation(bool isMoving, bool isUsingSkill = false)
+    /// <param name="useWalkInsteadOfRun">When true and this vehicle defines <see cref="VehicleDefinition.WalkActionIndex"/>, play walk cycle instead of run (e.g. Fenrir acceleration).</param>
+    public void SetRiderAnimation(bool isMoving, bool isUsingSkill = false, bool useWalkInsteadOfRun = false)
     {
         if (Model == null || Hidden)
             return;
@@ -237,7 +272,11 @@ public class VehicleObject : ModelObject
         else
         {
             if (isMoving)
-                targetAnim = runActionIndex;
+            {
+                bool useWalk = useWalkInsteadOfRun && walkActionIndex >= 0 &&
+                               Model.Actions != null && walkActionIndex < Model.Actions.Length;
+                targetAnim = useWalk ? walkActionIndex : runActionIndex;
+            }
             else
                 targetAnim = idleActionIndex;
 

@@ -34,6 +34,11 @@ namespace Client.Main.Controls.UI.Game.Skills
         private sealed class PanelControl : UIControl { }
 
         /// <summary>
+        /// Skill currently hovered in the grid (used with Ctrl+digit hotkeys — MuMain-style assignment).
+        /// </summary>
+        public SkillEntryState? HoveredSkill { get; private set; }
+
+        /// <summary>
         /// Fired when a skill is selected from the panel.
         /// </summary>
         public event Action<SkillEntryState>? SkillSelected;
@@ -112,6 +117,7 @@ namespace Client.Main.Controls.UI.Game.Skills
         /// </summary>
         public void Open(CharacterState characterState)
         {
+            HoveredSkill = null;
             if (characterState == null)
                 return;
 
@@ -198,6 +204,7 @@ namespace Client.Main.Controls.UI.Game.Skills
         public void Close()
         {
             Visible = false;
+            HoveredSkill = null;
         }
 
         private void OnSkillSlotClicked(SkillSlotControl slot)
@@ -230,6 +237,7 @@ namespace Client.Main.Controls.UI.Game.Skills
 
         private void OnSkillSlotHover(SkillEntryState? skill)
         {
+            HoveredSkill = skill;
             if (!_selectedSkillId.HasValue)
             {
                 UpdateDetail(skill);

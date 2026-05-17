@@ -17,6 +17,10 @@ public class VehicleDefinition
     /// Action indices for this vehicle model (as in SourceMain5.2 mount SetAction indices).
     /// </summary>
     public int IdleActionIndex { get; set; } = 0;
+
+    /// <summary>FENRIR_STAND=0, FENRIR_WALK=1, FENRIR_RUN=2 in SourceMain5.2. Set to -1 when mount has no separate walk cycle.</summary>
+    public int WalkActionIndex { get; set; } = -1;
+
     public int RunActionIndex { get; set; } = 2;
     public int SkillActionIndex { get; set; } = 4;
 

@@ -9,8 +9,19 @@ namespace Client.Data.BMD
     public class SkillBMDReader : BaseReader<Dictionary<int, SkillBMD>>
     {
         private const int MaxSkills = 1024;
-        private const int RecordSize = 88;
-        private const int NameLength = 32;
+
+        /// <summary>
+        /// Size of <c>SKILL_ATTRIBUTE_FIELDS</c> after the name in MuMain/OpenMU skill BMD (same for legacy and current file format).
+        /// Legacy file: 32-byte name + 56 = 88 bytes/record. Season 20+ file: 50-byte <c>Name</c> + 56 = 106 bytes/record.
+        /// </summary>
+        private const int BodyAfterNameBytes = 56;
+
+        /// <summary>MuMain <see cref="SKILL_ATTRIBUTE_FILE_LEGACY"/> — 32-byte UTF-8 name.</summary>
+        private const int RecordSizeLegacy = 32 + BodyAfterNameBytes;
+
+        /// <summary>MuMain <see cref="SKILL_ATTRIBUTE_FILE"/> — <c>MAX_SKILL_NAME</c> (50) byte UTF-8 name (e.g. MU 1.20.x Full pack).</summary>
+        private const int RecordSizeSeason20 = 50 + BodyAfterNameBytes;
+
         private const ushort ChecksumKey = 0x5A18;
 
         private readonly byte[] BuxCode = { 0xFC, 0xCF, 0xAB };
@@ -23,20 +34,21 @@ namespace Client.Data.BMD
             }
         }
 
-        private SkillBMD ParseSkill(ReadOnlySpan<byte> record)
+        private SkillBMD ParseSkill(ReadOnlySpan<byte> record, int nameLength)
         {
             var skill = new SkillBMD();
 
-            var nameSpan = record.Slice(0, NameLength);
+            if (record.Length < nameLength + BodyAfterNameBytes)
+                throw new InvalidDataException($"Skill record too small: {record.Length} for nameLen={nameLength}.");
+
+            var nameSpan = record.Slice(0, nameLength);
             var nullIndex = nameSpan.IndexOf((byte)0);
             if (nullIndex < 0)
-            {
-                nullIndex = NameLength;
-            }
+                nullIndex = nameLength;
 
             skill.Name = Encoding.UTF8.GetString(nameSpan.Slice(0, nullIndex)).TrimEnd();
 
-            var offset = NameLength;
+            var offset = nameLength;
 
             skill.RequiredLevel = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(offset, sizeof(ushort)));
             offset += sizeof(ushort);
@@ -97,7 +109,9 @@ namespace Client.Data.BMD
             skill.ItemSkill = record[offset++];
             skill.IsDamage = record[offset++] != 0;
             skill.Effect = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(offset, sizeof(ushort)));
+            offset += sizeof(ushort);
 
+            // Optional trailing padding in some MSVC builds — ignore if present.
             return skill;
         }
 
@@ -136,18 +150,19 @@ namespace Client.Data.BMD
 
         protected override Dictionary<int, SkillBMD> Read(byte[] buffer)
         {
-            if (buffer.Length < RecordSize)
+            if (buffer.Length < RecordSizeLegacy)
                 throw new InvalidDataException($"Skill buffer is too small ({buffer.Length} bytes).");
 
-            var skills = new Dictionary<int, SkillBMD>();
+            // Match MuMain SkillDataLoader: trailing DWORD checksum after MaxSkills records (same total sizes as OpenMU/MuMain).
+            int recordSize;
+            ReadOnlySpan<byte> dataSpan;
 
-            var dataLength = Math.Min(buffer.Length, RecordSize * MaxSkills);
-            var dataSpan = buffer.AsSpan(0, dataLength);
-
-            if (buffer.Length >= RecordSize * MaxSkills + sizeof(uint))
+            if (buffer.Length >= sizeof(uint) && (buffer.Length - sizeof(uint)) % MaxSkills == 0)
             {
-                var storedChecksum = BinaryPrimitives.ReadUInt32LittleEndian(
-                    buffer.AsSpan(RecordSize * MaxSkills, sizeof(uint)));
+                recordSize = (buffer.Length - sizeof(uint)) / MaxSkills;
+                dataSpan = buffer.AsSpan(0, recordSize * MaxSkills);
+
+                var storedChecksum = BinaryPrimitives.ReadUInt32LittleEndian(buffer.AsSpan(recordSize * MaxSkills, sizeof(uint)));
                 var computedChecksum = GenerateChecksum(dataSpan);
 
                 if (storedChecksum != 0 && storedChecksum != computedChecksum)
@@ -156,20 +171,38 @@ namespace Client.Data.BMD
                         $"Skill file checksum mismatch. stored=0x{storedChecksum:X8}, computed=0x{computedChecksum:X8}");
                 }
             }
+            else if (buffer.Length % MaxSkills == 0)
+            {
+                recordSize = buffer.Length / MaxSkills;
+                dataSpan = buffer.AsSpan();
+            }
+            else
+            {
+                throw new InvalidDataException(
+                    $"Unexpected skill.bmd size ({buffer.Length} bytes). Expected (N×{MaxSkills}) or (N×{MaxSkills}+4) with checksum.");
+            }
 
-            var recordCount = Math.Min(MaxSkills, dataLength / RecordSize);
-            Span<byte> decrypted = stackalloc byte[RecordSize];
+            // MuMain uses exactly sizeof(SKILL_ATTRIBUTE_FILE_LEGACY)==88 or sizeof(SKILL_ATTRIBUTE_FILE)==106 (packed).
+            int nameLength = recordSize switch
+            {
+                RecordSizeLegacy => 32,
+                RecordSizeSeason20 => 50,
+                _ => throw new InvalidDataException(
+                    $"Unsupported skill record size {recordSize}. Expected legacy {RecordSizeLegacy} or Season20/OpenMU-style {RecordSizeSeason20}.")
+            };
+
+            var skills = new Dictionary<int, SkillBMD>();
+            var recordCount = Math.Min(MaxSkills, dataSpan.Length / recordSize);
+            Span<byte> decrypted = stackalloc byte[RecordSizeSeason20]; // max supported record size
 
             for (var index = 0; index < recordCount; index++)
             {
-                var recordSpan = dataSpan.Slice(index * RecordSize, RecordSize);
-                DecryptRecord(recordSpan, decrypted);
+                var recordSpan = dataSpan.Slice(index * recordSize, recordSize);
+                DecryptRecord(recordSpan, decrypted.Slice(0, recordSize));
 
-                var skill = ParseSkill(decrypted);
+                var skill = ParseSkill(decrypted.Slice(0, recordSize), nameLength);
                 if (!string.IsNullOrWhiteSpace(skill.Name))
-                {
                     skills[index] = skill;
-                }
             }
 
             return skills;

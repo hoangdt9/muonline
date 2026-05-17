@@ -90,9 +90,25 @@ namespace Client.Main.Networking
 
             try
             {
-                // Resolve host name to IP addresses and select the first IPv4 address
-                var ipAddress = (await Dns.GetHostAddressesAsync(host, cancellationToken))
-                    .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+                // Prefer parsing dotted IPv4 literals — avoids unnecessary DNS (more reliable on macOS / loopback aliases).
+                var trimmedHost = host?.Trim() ?? string.Empty;
+                IPAddress ipAddress;
+                if (IPAddress.TryParse(trimmedHost, out var parsed))
+                {
+                    if (parsed.AddressFamily != AddressFamily.InterNetwork)
+                    {
+                        _logger.LogError("❓ IPv6 host not supported (need IPv4): {Host}", host);
+                        return false;
+                    }
+
+                    ipAddress = parsed;
+                }
+                else
+                {
+                    ipAddress = (await Dns.GetHostAddressesAsync(trimmedHost, cancellationToken))
+                        .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+                }
+
                 if (ipAddress == null)
                 {
                     _logger.LogError("❓ Failed to resolve IPv4 address for host: {Host}", host);

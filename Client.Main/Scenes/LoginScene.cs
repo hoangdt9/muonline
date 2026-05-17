@@ -365,6 +365,10 @@ namespace Client.Main.Scenes
                 _logger.LogInformation("Login attempt from dialog for user: {Username}", username);
                 _ = _networkManager.SendLoginRequestAsync(username, password);
             }
+            else if (_networkManager.CurrentState == ClientConnectionState.ConnectingToGameServer)
+            {
+                MessageWindow.Show("Still connecting to the game server. Wait until you are connected (status shows connected), then press Login.");
+            }
             else
             {
                 _logger.LogWarning("Login attempt ignored, invalid state: {State}", _networkManager.CurrentState);

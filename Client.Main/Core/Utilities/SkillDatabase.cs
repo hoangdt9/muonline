@@ -10,7 +10,7 @@ using Microsoft.Extensions.Logging;
 namespace Client.Main.Core.Utilities
 {
     /// <summary>
-    /// Static database for skill definitions loaded from skill_eng.bmd.
+    /// Static database for skill definitions loaded from <c>Local/skill.bmd</c> (same binary layouts as MuMain legacy / Season20).
     /// </summary>
     public static class SkillDatabase
     {
@@ -25,14 +25,14 @@ namespace Client.Main.Core.Utilities
         }
 
         /// <summary>
-        /// Loads skill_eng.bmd from an embedded resource and builds the definition table.
+        /// Loads <c>Local/skill.bmd</c> (MU Full pack / OpenMU-compatible; 32-byte or 50-byte name records).
         /// </summary>
         private static async Task<Dictionary<int, SkillBMD>> InitializeSkillData()
         {
             var skillPath = Path.Combine(Constants.DataPath, "Local", "skill.bmd");
             var reader = new SkillBMDReader();
             var skills = await reader.Load(skillPath);
-            _logger?.LogInformation($"Loaded {skills.Count} skills from skill_eng.bmd");
+            _logger?.LogInformation("Loaded {Count} skills from {Path}", skills.Count, skillPath);
             return skills;
         }
 

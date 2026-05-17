@@ -21,6 +21,8 @@
 
   <PropertyGroup>
     <DefineConstants>$(DefineConstants);MACOS</DefineConstants>
+    <!-- MGCB EffectProcessor needs Wine/fxc on macOS and usually fails; ship pre-built DesktopGL .xnb instead. -->
+    <EnableMGCBItems>false</EnableMGCBItems>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
@@ -29,7 +31,6 @@
 
   <ItemGroup>
     <PackageReference Include="MonoGame.Framework.DesktopGL" Version="3.8.4.1" />
-    <PackageReference Include="MonoGame.Content.Builder.Task" Version="3.8.4.1" />
   </ItemGroup>
 
   <ItemGroup>
@@ -41,15 +42,18 @@
     <TrimmerRootAssembly Include="mscorlib" />
   </ItemGroup>
 
-    <ItemGroup>
-    <MonoGameContentReference Include="..\Client.Main\MGContent\Content.mgcb">
-      <Link>Content\Content.mgcb</Link>
-    </MonoGameContentReference>
+  <!-- Pre-built pipeline output (DesktopGL). Rebuild on Windows/Linux via MuWinGL/MuLinux if you change MGContent. -->
+  <ItemGroup>
+    <Content Include="..\Client.Main\MGContent\bin\DesktopGL\Content\**\*.*">
+      <Link>Content\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
-  <Target Name="RestoreDotnetTools" BeforeTargets="CollectPackageReferences">
-    <Message Text="Restoring dotnet tools" Importance="High" />
-    <Exec Command="dotnet tool restore" />
+  <Target Name="EnsurePrebuiltMgcbContent" BeforeTargets="BeforeBuild">
+    <Error
+      Text="Missing pre-built MonoGame content under Client.Main/MGContent/bin/DesktopGL/Content/. Build MGContent once on Windows or Linux (e.g. dotnet build MuWinGL) and copy the Content folder, or run MGCB there."
+      Condition="!Exists('$(MSBuildThisFileDirectory)..\Client.Main\MGContent\bin\DesktopGL\Content\AlphaRGB.xnb')" />
   </Target>
 
 </Project>

@@ -326,6 +326,24 @@ namespace Client.Main.Core.Client
         // Skills
         private readonly ConcurrentDictionary<ushort, SkillEntryState> _skillList = new();
 
+        /// <summary>
+        /// HUD digit-row skill bindings (Mu convention): slot index matches keyboard digit —
+        /// indices 1–9 for keys 1–9, index 0 for key 0.
+        /// </summary>
+        private readonly ushort?[] _hudSkillByHotkeySlot = new ushort?[10];
+
+        /// <summary>
+        /// Q/W/E quick-use inventory slots for consumables (Hp/mp/etc.).
+        /// </summary>
+        private readonly byte?[] _hudPotionInventorySlotByKeyIndex = new byte?[3];
+
+        private int _armedHudHotkeySlotIndex = 1;
+
+        /// <summary>
+        /// Fired when HUD hotkey bindings or armed skill slot changes (skills + potion binds).
+        /// </summary>
+        public event Action HudHotkeysChanged;
+
         // Active Buffs/Effects
         private readonly ConcurrentDictionary<(byte EffectId, ushort PlayerIdMasked), ActiveBuffState> _activeBuffs = new();
         public event Action ActiveBuffsChanged;
@@ -1569,6 +1587,13 @@ namespace Client.Main.Core.Client
         public void ClearSkillList()
         {
             _skillList.Clear();
+            for (int i = 0; i < _hudSkillByHotkeySlot.Length; i++)
+            {
+                _hudSkillByHotkeySlot[i] = null;
+            }
+
+            HudHotkeysChanged?.Invoke();
+            HudHotkeysPersistence.Save(this);
             _logger.LogDebug("Skill list cleared.");
         }
 
@@ -1590,6 +1615,16 @@ namespace Client.Main.Core.Client
             if (removed)
             {
                 _logger.LogDebug("Skill removed. Skill ID: {SkillId}", skillId);
+                for (int i = 0; i < _hudSkillByHotkeySlot.Length; i++)
+                {
+                    if (_hudSkillByHotkeySlot[i] == skillId)
+                    {
+                        _hudSkillByHotkeySlot[i] = null;
+                    }
+                }
+
+                HudHotkeysChanged?.Invoke();
+                HudHotkeysPersistence.Save(this);
             }
             else
             {
@@ -1603,6 +1638,159 @@ namespace Client.Main.Core.Client
         public IEnumerable<SkillEntryState> GetSkills()
         {
             return _skillList.Values.OrderBy(s => s.SkillId);
+        }
+
+        /// <summary>
+        /// Slot index 0–9 (keyboard 0–9 row). Keys 1–9 → indices 1–9, key 0 → index 0.
+        /// </summary>
+        public ushort? GetHudSkillId(int hotkeySlotIndex)
+        {
+            if (hotkeySlotIndex < 0 || hotkeySlotIndex >= _hudSkillByHotkeySlot.Length)
+            {
+                return null;
+            }
+
+            return _hudSkillByHotkeySlot[hotkeySlotIndex];
+        }
+
+        /// <summary>
+        /// Restores HUD bindings from local persistence (<see cref="HudHotkeysPersistence"/>).
+        /// </summary>
+        internal void ApplyHudHotkeysFromPersisted(ushort?[]? skills, byte?[]? potions, int armedHudHotkeySlotIndex)
+        {
+            if (skills != null && skills.Length == _hudSkillByHotkeySlot.Length)
+            {
+                for (int i = 0; i < skills.Length; i++)
+                {
+                    _hudSkillByHotkeySlot[i] = skills[i];
+                }
+            }
+
+            if (potions != null && potions.Length == _hudPotionInventorySlotByKeyIndex.Length)
+            {
+                for (int i = 0; i < potions.Length; i++)
+                {
+                    _hudPotionInventorySlotByKeyIndex[i] = potions[i];
+                }
+            }
+
+            _armedHudHotkeySlotIndex = Math.Clamp(armedHudHotkeySlotIndex, 0, 9);
+            HudHotkeysChanged?.Invoke();
+        }
+
+        /// <summary>
+        /// Arms the given HUD slot so right-click skill usage uses its skill (Mu-style).
+        /// </summary>
+        public void SetArmedHudHotkeySlotIndex(int hotkeySlotIndex)
+        {
+            if (hotkeySlotIndex < 0 || hotkeySlotIndex >= _hudSkillByHotkeySlot.Length)
+            {
+                return;
+            }
+
+            _armedHudHotkeySlotIndex = hotkeySlotIndex;
+            HudHotkeysChanged?.Invoke();
+            HudHotkeysPersistence.Save(this);
+        }
+
+        public int ArmedHudHotkeySlotIndex => _armedHudHotkeySlotIndex;
+
+        /// <summary>
+        /// Binds a skill id to a HUD digit slot; clears the same skill from other slots (MuMain-style).
+        /// </summary>
+        public void SetHudSkillId(int hotkeySlotIndex, ushort? skillId)
+        {
+            if (hotkeySlotIndex < 0 || hotkeySlotIndex >= _hudSkillByHotkeySlot.Length)
+            {
+                return;
+            }
+
+            if (skillId.HasValue)
+            {
+                for (int i = 0; i < _hudSkillByHotkeySlot.Length; i++)
+                {
+                    if (i != hotkeySlotIndex && _hudSkillByHotkeySlot[i] == skillId.Value)
+                    {
+                        _hudSkillByHotkeySlot[i] = null;
+                    }
+                }
+            }
+
+            _hudSkillByHotkeySlot[hotkeySlotIndex] = skillId;
+            HudHotkeysChanged?.Invoke();
+            HudHotkeysPersistence.Save(this);
+        }
+
+        /// <summary>
+        /// Skill currently used by right-click targeting (armed HUD slot).
+        /// </summary>
+        public SkillEntryState TryGetArmedSkill()
+        {
+            ushort? id = GetHudSkillId(_armedHudHotkeySlotIndex);
+            if (!id.HasValue)
+            {
+                return null;
+            }
+
+            return _skillList.TryGetValue(id.Value, out SkillEntryState s) ? s : null;
+        }
+
+        public SkillEntryState TryGetSkillById(ushort skillId)
+        {
+            return _skillList.TryGetValue(skillId, out SkillEntryState s) ? s : null;
+        }
+
+        /// <summary>
+        /// If no HUD skills bound yet, bind first learned skill to slot <c>1</c> and arm it.
+        /// </summary>
+        public void EnsureDefaultHudHotkeys()
+        {
+            bool any = false;
+            for (int i = 0; i < _hudSkillByHotkeySlot.Length; i++)
+            {
+                if (_hudSkillByHotkeySlot[i].HasValue)
+                {
+                    any = true;
+                    break;
+                }
+            }
+
+            if (any)
+            {
+                return;
+            }
+
+            SkillEntryState first = GetSkills().FirstOrDefault();
+            if (first != null)
+            {
+                SetHudSkillId(1, first.SkillId);
+                SetArmedHudHotkeySlotIndex(1);
+            }
+        }
+
+        /// <summary>
+        /// Q/W/E binding index 0..2 → inventory slot byte (Season 6 encoding).
+        /// </summary>
+        public byte? GetHudPotionInventorySlot(int qweIndex)
+        {
+            if (qweIndex < 0 || qweIndex >= _hudPotionInventorySlotByKeyIndex.Length)
+            {
+                return null;
+            }
+
+            return _hudPotionInventorySlotByKeyIndex[qweIndex];
+        }
+
+        public void SetHudPotionInventorySlot(int qweIndex, byte? inventorySlot)
+        {
+            if (qweIndex < 0 || qweIndex >= _hudPotionInventorySlotByKeyIndex.Length)
+            {
+                return;
+            }
+
+            _hudPotionInventorySlotByKeyIndex[qweIndex] = inventorySlot;
+            HudHotkeysChanged?.Invoke();
+            HudHotkeysPersistence.Save(this);
         }
 
         // --- Active Buffs/Effects Methods ---
